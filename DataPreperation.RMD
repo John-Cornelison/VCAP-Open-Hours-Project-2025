@@ -1,0 +1,2642 @@
+---
+title: "Data Analysis"
+author: "John Cornelison"
+date: "10/16/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, include=FALSE}
+
+#VCAS COLUMNS I STILL NEED TO MAKE
+# ST_cats_per_HH
+# ST_dogs_per_HH
+# ST_pets_per_HH
+# population_cat_county
+# population_dog_county
+# population_pets_county
+# @2019MedianHouseholdIncome
+# @2019TotalHouseholds
+# emp_norm_pets
+# percentile_norm_pets
+# percentile_sum
+# percentile_index
+# index_score
+# sales_norm_pets
+# sales/employee
+
+
+### Reading in Libraries
+library(tidyverse)
+library(readr)
+library(stringr)
+library(tidycensus)
+library(sf)
+library(tigris)
+
+
+```
+
+
+```{r, echo=FALSE}
+#per capita income not in 2022 version.
+#Is Speakenglishltw E_LIMENG? YES
+setwd("C:/Users/john/Documents/GitHub_Data/VCAP-Open-Hours-Project-2025-Data")
+vet_clinic_open_hours <- read_csv("VetList2025.csv")
+SVI_index_2022 <- read_csv("SVI_2022_US_county.csv")
+
+
+
+military_to_standard_char <- function(x) {
+  # x: character vector like "0000", "1330", "Open 24 Hours", "Closed", NA
+  
+  out <- rep(NA_character_, length(x))
+  
+  # 1) Special case: Open 24 Hours (keep as-is)
+  is_24 <- !is.na(x) & x == "Open 24 Hours"
+  out[is_24] <- x[is_24]
+  
+  # 2) Valid 4-digit times: HHMM (00–23, 00–59)
+  is_time <- !is.na(x) & grepl("^\\d{4}$", x)
+  times   <- x[is_time]
+  
+  hour   <- as.integer(substr(times, 1, 2))
+  minute <- as.integer(substr(times, 3, 4))
+  
+  # AM/PM
+  period <- ifelse(hour < 12, "AM", "PM")
+  
+  # Convert to 12-hour clock
+  hour12 <- hour %% 12
+  hour12[hour12 == 0] <- 12
+  
+  out[is_time] <- sprintf("%d:%02d %s", hour12, minute, period)
+  
+  # 3) Everything else (e.g. "Closed", "", etc.) – keep original
+  others <- !is_24 & !is_time & !is.na(x)
+  out[others] <- x[others]
+  
+  # NA stays NA
+  out
+}
+
+
+createTimeDF <- function(df, col_name){
+  
+  new_df <- df %>% 
+    group_by({{col_name}}) %>% 
+    summarise(Count = n()) %>%
+    mutate(Percent = round(Count/nrow(df), 4)*100) %>% 
+    arrange(desc(Count))
+    
+    
+  new_df[is.na(new_df)] <- "Closed"
+  
+  return(new_df)
+   
+}
+
+
+
+```
+ 
+### Creating Demographic/Socioeconomic County Datatable
+
+```{r}
+
+state_fips_df <- data.frame(
+  STATE_FIPS = c(
+    1, 2, 4, 5, 6, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 
+    25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 44, 
+    45, 46, 47, 48, 49, 50, 51, 53, 54, 55, 56
+  ),
+  ST_ABBR = c(
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID", 
+    "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", 
+    "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", 
+    "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"
+  )
+)
+
+SVI_prepped <- SVI_index_2022 %>% 
+  select(FIPS, E_TOTPOP, E_HU, E_POV150, E_HBURD, E_DISABL, E_MINRTY, E_LIMENG, E_NOVEH, EP_POV150, EP_HBURD, EP_UNEMP, EP_DISABL, EP_MINRTY, EP_LIMENG, EP_NOVEH, EPL_POV150, EPL_HBURD, EPL_UNEMP, EPL_DISABL, EPL_MINRTY, EPL_LIMENG, EPL_NOVEH) %>%
+  rename("Households1" = "E_HU",
+         "Disabledpop" = "E_DISABL",
+         "Minoritypop" = "E_MINRTY",
+         "Speakenglishltw" = "E_LIMENG",
+         "novehiclepop" = "E_NOVEH",
+         "PercentBelow150Poverty" = "EP_POV150",
+         "PercentWithHousingCostBurden" = "EP_HBURD",
+         "PeopleBelow150Poverty" = "E_POV150",
+         "PeopleWithHousingCostBurden" = "E_HBURD",
+         "percent_unemployed" = "EP_UNEMP",
+         "percent_disabled" = "EP_DISABL",
+         "percent_minority" = "EP_MINRTY",
+         "percent_englishltw" = "EP_LIMENG",
+         "percent_novehicle" = "EP_NOVEH",
+         "PercentileBelow150Poverty" = "EPL_POV150",
+         "PercentileWithHousingCostBurden" = "EPL_HBURD",
+         "percentile_unemployed" = "EPL_UNEMP",
+         "percentile_disabled" = "EPL_DISABL",
+         "percentile_minority" = "EPL_MINRTY",
+         "percentile_englishltw" = "EPL_LIMENG",
+         "percentile_noveh" = "EPL_NOVEH")
+
+v23 <- load_variables(2023, "acs1", cache = TRUE)
+
+variables_list = c(POPULATION = "B01001_001",
+                   WHITE = "B01001A_001",
+                   BLACK = "B01001B_001",
+                   HISPANIC = "B01001I_001",
+                   MULT_RACE = "B01001G_001",
+                   AVE_HH_SZ = "B25010_001",
+                   HSE_UNITS = "B11011_001",
+                   VACANT = "B25002_003",
+                   OWNER_OCC = "B25003_002",
+                   RENTER_OCC = "B25003_003",
+                   MEDIAN_HOUSEHOLD_INCOME_2023 = "B19019_001")
+
+census_data <- get_acs(
+  geography = "county",      # "tract", "place", "state", etc.
+  variables = variables_list,
+  state = NULL, # Median Gross Rent
+  year = 2023,               # Most recent 1-year data
+  survey = "acs5", # Use "acs1" for 2024; "acs5" for 2019-2023
+  geometry = TRUE,
+) %>% 
+  mutate(ALAND_calculated = st_area(geometry),
+         ALAND = as.numeric(ALAND_calculated),
+         SQ_MILES = ALAND * 3.86102e-7)
+
+ACS_values <- census_data %>% 
+  select(GEOID, variable, estimate) %>% 
+  pivot_wider(names_from = variable, values_from = estimate) %>% 
+  st_drop_geometry()
+
+county_info <- census_data %>% 
+  select(GEOID, NAME, SQ_MILES) %>% 
+  st_drop_geometry() %>% 
+  unique()
+
+socio_demo_info <- county_info %>% 
+  left_join(ACS_values, by = "GEOID") %>% 
+  mutate(STATE_NAME = str_split_i(NAME, ",", 2),
+         LOCATION = NAME,
+         NAME = str_split_i(NAME, " ", 1),
+         STATE_FIPS = as.numeric(str_sub(GEOID, 1,2)),
+         CNTY_FIPS = str_sub(GEOID, 3,5),
+         FIPS = paste0(STATE_FIPS, CNTY_FIPS),
+         CNTY_FIPS = as.numeric(CNTY_FIPS),
+         ST = STATE_FIPS, 
+         POP_SQMI = POPULATION/SQ_MILES,
+         COUNTY = NAME) %>% 
+  left_join(state_fips_df, by = "STATE_FIPS") %>% 
+  left_join(SVI_prepped, by = c("GEOID" = "FIPS"))
+
+### SELECT NAMES FOR THE FINAL DF
+
+#select(NAME, STATE_NAME, STATE_FIPS, CNTY_FIPS, FIPS, POPULATION, POP_SQMI, WHITE, BLACK, HISPANIC, MULT_RACE, AVE_HH_SZ, HSE_UNITS, VACANT, OWNER_OCC, RENTER_OCC, ST, ST_ABBR, COUNTY, LOCATION, E_TOTPOP, `Households1`, PeopleBelow150Poverty, PeopleWithHousingCostBurden, Disabledpop, Minoritypop, Speakenglishltw, novehiclepop, PercentBelow150Poverty, PercentWithHousingCostBurden, percent_unemployed, percent_disabled, percent_minority, percent_englishltw, percent_novehicle,)
+
+
+```
+
+
+
+```{r}
+duplicate_clinics_names_prep_df <- vet_clinic_open_hours %>% 
+  mutate(unique_clinic = paste0(`Company Name`, "_", `City`, "_", `State`)) %>% 
+  group_by(unique_clinic) %>% 
+  summarise(count = n()) %>% 
+  filter(count == 2)
+
+duplicate_clinics_names <- duplicate_clinics_names_prep_df$unique_clinic
+
+duplicates_df <- vet_clinic_open_hours %>% 
+  mutate(unique_clinic = paste0(`Company Name`, "_", `City`, "_", `State`),
+         `Location Employee Size Actual` = as.numeric(`Location Employee Size Actual`),
+         `Location Sales Volume Actual` = as.numeric(str_remove_all(`Location Sales Volume Actual`, "\\D"))) %>% 
+  filter(unique_clinic %in% duplicate_clinics_names) 
+
+duplicates_df <- duplicates_df %>%
+  filter(!str_detect(duplicates_df$`Company Name`, regex("banfield|vetco|rehm|vip petcare|best friends|lovet|petvet|vca|veterinary emergency group", ignore_case = TRUE))) %>% 
+  select(`Company Name`, Address, City, State, `ZIP Code`, `Location Sales Volume Actual`, `Location Employee Size Actual`) %>% 
+  group_by(`Company Name`) %>% 
+  filter(`Location Sales Volume Actual` == min(`Location Sales Volume Actual`)) %>% 
+  mutate(unique_clinic_location = paste0(`Company Name`,"_", Address))
+
+clinics_to_remove_list <- duplicates_df$unique_clinic_location
+
+vet_clinic_open_hours_deduped <- vet_clinic_open_hours %>% 
+  mutate(unique_clinic_location = paste0(`Company Name`,"_", Address)) %>% 
+  filter(!unique_clinic_location %in% clinics_to_remove_list)
+
+vet_clinic_open_hours_sf <- st_as_sf(vet_clinic_open_hours_deduped, coords = c("Longitude", "Latitude"), crs = 4269)
+
+us_counties <- counties(cb = TRUE, resolution = "500k", year = 2023) %>% 
+  select(GEOID, NAME)
+
+vet_clinic_open_hours_joined <- st_join(vet_clinic_open_hours_sf, us_counties, join = st_intersects)
+  
+
+```
+
+
+
+```{r, include=FALSE}
+
+vet_clinic_values <- vet_clinic_open_hours_joined %>% 
+  mutate(location_employee_size_actual = as.numeric(`Location Employee Size Actual`),
+         location_sales_volume_actual = as.numeric(str_remove_all(`Location Sales Volume Actual`, "\\D"))) %>% 
+  group_by(GEOID) %>%
+  summarise(NumberofEmployees_sum = sum(location_employee_size_actual),
+            NumberofEmployees_mean = mean(location_employee_size_actual),
+            SalesVolume_sum = sum(location_sales_volume_actual),
+            SalesVolume_mean = mean(location_sales_volume_actual),
+            N_clinics = n())
+
+VCAS_final <- socio_demo_info %>% 
+  left_join(vet_clinic_values, by = "GEOID") %>% 
+  mutate(emp_norm_hh = (NumberofEmployees_sum/HSE_UNITS)*1000,
+         sales_norm_hh = (SalesVolume_sum/HSE_UNITS)*1000)
+
+
+### Reading in open hour dataset and 
+vet_clinic_open_hours <- read_csv("VetList2025.csv") %>% 
+  mutate(unique_address = paste(Address, City, State, `ZIP Code`, sep = ", ")) %>% 
+  mutate(Monday_Open_st = military_to_standard_char(`Monday Open`),
+         Tuesday_Open_st = military_to_standard_char(`Tuesday Open`),
+         Wednesday_open_st = military_to_standard_char(`Wednesday Open`),
+         Thursday_open_st = military_to_standard_char(`Thursday Open`),
+         Friday_open_st = military_to_standard_char(`Friday Open`),
+         Saturday_open_st = military_to_standard_char(`Saturday Open`),
+         Sunday_open_st = military_to_standard_char(`Sunday Open`),
+         Monday_close_st = military_to_standard_char(`Monday Close`),
+         Tuesday_close_st = military_to_standard_char(`Tuesday Close`),
+         Wednesday_close_st = military_to_standard_char(`Wednesday Close`),
+         Thursday_close_st = military_to_standard_char(`Thursday Close`),
+         Friday_close_st = military_to_standard_char(`Friday Close`),
+         Saturday_close_st = military_to_standard_char(`Saturday Close`),
+         Sunday_close_st = military_to_standard_char(`Sunday Close`))
+
+
+sum(is.na(vet_clinic_open_hours$Latitude))
+sum(is.na(vet_clinic_open_hours$Longitude))
+
+
+
+
+
+
+
+
+
+
+
+
+
+connecticut_counties <- SVI_Counties %>% 
+  filter(str_detect(LOCATION, "Connecticut"))
+
+connecticut_city_county <- us_zips %>% 
+  filter(state_id == "CT") %>% 
+  distinct(city, .keep_all = TRUE) %>% 
+  mutate(city_state = paste(city, state_name), sep = " ")
+
+all_geocoded_addresses <- read_csv("geocoded_addresses_join_table.csv")
+
+geo_addresses_w_CT <- read_csv("geo_addresses_w_CT_join_table.csv") %>%
+  mutate(City = case_when(City == "NEW PRESTON MARB" ~ "New Preston Marble Dale",
+                          TRUE ~ City),
+         city_state = paste(str_to_title(City), str_to_title(`State Description`), sep = " ")) %>% 
+  left_join(select(connecticut_city_county, city_state, county_name), by = "city_state") %>%
+  separate(col = full_census_tract, into = c("census_tract", "census_county", "census_state"), sep = ", ", remove = FALSE) %>% 
+  mutate(full_county_name = paste(county_name, "County", sep = " "),
+         full_census_tract = case_when(State == "CT" ~ paste(census_tract, full_county_name, census_state, sep = ", "),
+         TRUE ~ full_census_tract)) %>% 
+  separate(col = full_census_tract, into = c("census_tract", "county_name", "state_name"), sep = ", ", remove = FALSE) %>%
+  mutate(county_name = case_when(full_address == "WASHINGTON CROSSING ANIMAL HSP, 1240 GEN WSHG MEM BLVD, WASHINGTON CROSS, PA, 18977" ~ "Bucks County",
+                                 full_address == "GILBERT VETERINARY HOSPITAL, 1655 S GILBERT RD, GILBERT, AZ, 85295" ~ "Maricopa County",
+                                 full_address == "STRALEY VETERINARY LARGE, 465 HUBLERSBURG RD, BELLEFONTE, PA, 16823" ~ "Centre County",
+                                 full_address == "URBAN ANIMAL, 909 E THOMAS ST, SEATTLE, WA, 98102" ~ "King County",
+                                 full_address == "SPAY NOW, 7401 VAN DUSEN RD, LAUREL, MD, 20707" ~ "Prince George's County",
+                                 full_address == "KAPAA ANIMAL CLINIC, 4-1571 KUHIO HWY, KAPAA, HI, 96746" ~ "Kauai County",
+                                 full_address == "GRAYSON VETERINARY HOSPITAL, 2632 LOGANVILLE HWY, GRAYSON, GA, 30017" ~ "Gwinnett County",
+                                 TRUE ~ county_name),
+         state_name = case_when(full_address == "WASHINGTON CROSSING ANIMAL HSP, 1240 GEN WSHG MEM BLVD, WASHINGTON CROSS, PA, 18977" ~ "Pennsylvania",
+                                 full_address == "GILBERT VETERINARY HOSPITAL, 1655 S GILBERT RD, GILBERT, AZ, 85295" ~ "Arizona",
+                                 full_address == "STRALEY VETERINARY LARGE, 465 HUBLERSBURG RD, BELLEFONTE, PA, 16823" ~ "Pennsylvania",
+                                 full_address == "URBAN ANIMAL, 909 E THOMAS ST, SEATTLE, WA, 98102" ~ "Washington",
+                                 full_address == "SPAY NOW, 7401 VAN DUSEN RD, LAUREL, MD, 20707" ~ "Maryland",
+                                 full_address == "KAPAA ANIMAL CLINIC, 4-1571 KUHIO HWY, KAPAA, HI, 96746" ~ "Hawaii",
+                                 full_address == "GRAYSON VETERINARY HOSPITAL, 2632 LOGANVILLE HWY, GRAYSON, GA, 30017" ~ "Georgia",
+                                 TRUE ~ state_name),
+         census_tract = case_when(full_address == "WASHINGTON CROSSING ANIMAL HSP, 1240 GEN WSHG MEM BLVD, WASHINGTON CROSS, PA, 18977" ~ "Census Tract 1054.02",
+                                 full_address == "GILBERT VETERINARY HOSPITAL, 1655 S GILBERT RD, GILBERT, AZ, 85295" ~ "Census Tract 8149",
+                                 full_address == "STRALEY VETERINARY LARGE, 465 HUBLERSBURG RD, BELLEFONTE, PA, 16823" ~ "Census Tract 107",
+                                 full_address == "URBAN ANIMAL, 909 E THOMAS ST, SEATTLE, WA, 98102" ~ "Census Tract 75.01",
+                                 full_address == "SPAY NOW, 7401 VAN DUSEN RD, LAUREL, MD, 20707" ~ "Census Tract 8002.12",
+                                 full_address == "KAPAA ANIMAL CLINIC, 4-1571 KUHIO HWY, KAPAA, HI, 96746" ~ "Census Tract 403.02",
+                                 full_address == "GRAYSON VETERINARY HOSPITAL, 2632 LOGANVILLE HWY, GRAYSON, GA, 30017" ~ "Census Tract 507.42",
+                                 TRUE ~ census_tract),
+         lat = case_when(full_address == "WASHINGTON CROSSING ANIMAL HSP, 1240 GEN WSHG MEM BLVD, WASHINGTON CROSS, PA, 18977" ~ 40.29192,
+                                 full_address == "GILBERT VETERINARY HOSPITAL, 1655 S GILBERT RD, GILBERT, AZ, 85295" ~ 33.31992,
+                                 full_address == "STRALEY VETERINARY LARGE, 465 HUBLERSBURG RD, BELLEFONTE, PA, 16823" ~ 40.96168,
+                                 full_address == "URBAN ANIMAL, 909 E THOMAS ST, SEATTLE, WA, 98102" ~ 47.62102,
+                                 full_address == "SPAY NOW, 7401 VAN DUSEN RD, LAUREL, MD, 20707" ~ 39.08487,
+                                 full_address == "KAPAA ANIMAL CLINIC, 4-1571 KUHIO HWY, KAPAA, HI, 96746" ~ 22.07996,
+                                 full_address == "GRAYSON VETERINARY HOSPITAL, 2632 LOGANVILLE HWY, GRAYSON, GA, 30017" ~ 33.88562,
+                                 TRUE ~ lat),
+         long = case_when(full_address == "WASHINGTON CROSSING ANIMAL HSP, 1240 GEN WSHG MEM BLVD, WASHINGTON CROSS, PA, 18977" ~ -74.87357,
+                                 full_address == "GILBERT VETERINARY HOSPITAL, 1655 S GILBERT RD, GILBERT, AZ, 85295" ~ -111.78971,
+                                 full_address == "STRALEY VETERINARY LARGE, 465 HUBLERSBURG RD, BELLEFONTE, PA, 16823" ~ -77.60882,
+                                 full_address == "URBAN ANIMAL, 909 E THOMAS ST, SEATTLE, WA, 98102" ~ -122.3207,
+                                 full_address == "SPAY NOW, 7401 VAN DUSEN RD, LAUREL, MD, 20707" ~ -76.88106,
+                                 full_address == "KAPAA ANIMAL CLINIC, 4-1571 KUHIO HWY, KAPAA, HI, 96746" ~ -159.31429,
+                                 full_address == "GRAYSON VETERINARY HOSPITAL, 2632 LOGANVILLE HWY, GRAYSON, GA, 30017" ~ -83.94393,
+                                 TRUE ~ long),
+        county_name = case_when(full_address == "VCA ANIMAL HOSPITAL OF VERNON, 155 TALCOTTVILLE RD, VERNON, CT, 06066" ~ "Tolland County",
+                                   full_address == "CONNECTICUT VETERINARY CTR, 88 HIGH RD, KENSINGTON, CT, 06037" ~ "Hartford County",
+                                   full_address == "LISBON VETERINARY CLINIC, 91 RIVER RD # 12, LISBON, CT, 06351" ~ "New London County",
+                                   full_address == "ANIMAL HOSPITAL OF BERLIN, 369 NEW BRITAIN RD # D, KENSINGTON, CT, 06037" ~ "Hartford County",
+                                   TRUE ~ county_name),
+        full_census_tract = case_when(full_address == "WASHINGTON CROSSING ANIMAL HSP, 1240 GEN WSHG MEM BLVD, WASHINGTON CROSS, PA, 18977" ~ paste(census_tract, county_name, state_name, sep = ", "),
+                                 full_address == "GILBERT VETERINARY HOSPITAL, 1655 S GILBERT RD, GILBERT, AZ, 85295" ~ paste(census_tract, county_name, state_name, sep = ", "),
+                                 full_address == "STRALEY VETERINARY LARGE, 465 HUBLERSBURG RD, BELLEFONTE, PA, 16823" ~ paste(census_tract, county_name, state_name, sep = ", "),
+                                 full_address == "URBAN ANIMAL, 909 E THOMAS ST, SEATTLE, WA, 98102" ~ paste(census_tract, county_name, state_name, sep = ", "),
+                                 full_address == "SPAY NOW, 7401 VAN DUSEN RD, LAUREL, MD, 20707" ~ paste(census_tract, county_name, state_name, sep = ", "),
+                                 full_address == "KAPAA ANIMAL CLINIC, 4-1571 KUHIO HWY, KAPAA, HI, 96746" ~ paste(census_tract, county_name, state_name, sep = ", "),
+                                 full_address == "GRAYSON VETERINARY HOSPITAL, 2632 LOGANVILLE HWY, GRAYSON, GA, 30017" ~ paste(census_tract, county_name, state_name, sep = ", "),
+                                 TRUE ~ full_census_tract))
+
+geo_addresses_w_CT <- geo_addresses_w_CT %>% 
+  select(-32, -33, -33, -34)
+  
+
+#getting Median Income for census tracts and counties by state and county population
+
+#med_income_census_tract_by_state <- data.frame("GEOID" = character(),
+#                                               "NAME" = character(),
+#                                               "variable" = character(),
+#                                               "estimate" = numeric(),
+#                                               "moe" = numeric())
+
+
+#for (state in states) {
+#  tract_income <-  get_acs(
+#    year = 2021,
+#    geography = "tract",
+#    state = state,
+#    variables = "B19013_001")
+#  
+#  med_income_census_tract_by_state <- rbind(med_income_census_tract_by_state, tract_income)
+#}
+
+
+
+#county_pop_by_state <- data.frame("GEOID" = character(),
+#                                               "NAME" = character(),
+#                                               "variable" = character(),
+#                                               "year" = numeric(),
+#                                               "value" = numeric())
+
+
+
+
+#for (state in states) {
+#  county_pop <-  get_decennial(
+#  geography = "county",
+#  variables = "P1_001N",
+#  state = state,
+#  year = 2020)
+#  county_pop_by_state <- rbind(county_pop_by_state, county_pop)
+#}
+
+#write_csv(med_income_census_tract_by_state, "med_income_by_census_tract.csv")
+#write_csv(county_pop_by_state, "county_pop_by_state.csv")
+
+county_pop_by_state <- read_csv("county_pop_by_state.csv")
+med_income_by_census_tract <- read_csv("med_income_by_census_tract.csv")
+
+
+
+#setwd("C:/Users/john/Documents/GitHub_Data/VCAP-Open-Hours-Project-Data")
+#setwd("C:/Users/johnc/Documents/GitHub_Data/VCAP-Open-Hours-Project-Data")
+other_geocoded_addresses <- read_csv("other_geo_coded_addresses.csv") %>% 
+  mutate(num_commas = str_count(google_address, ","),
+         full_census_tract = case_when(full_address == "COTNER ANIMAL CLINIC PC, 1265 S COTNER BLVD # 2, LINCOLN, NE, 68510" ~ "Census Tract 14, Lancaster County, Nebraska",
+                                       full_address == "SELBY VETERINARY SVC LLC, 1412 MAIN ST, SELBY, SD, 57472" ~ "Census Tract 9651, Walworth County, South Dakota",
+                                       full_address == "STRALEY LA VETERINARY SVC, 465 HUBLERSBURG RD, BELLEFONTE, PA, 16823" ~ "Census Tract 107, Centre County, Pennsylvania",
+                                       full_address == "LITTLE RIVER VETERINARY HOSP, 1419 LITTLEFIELD RD, BROOKS, ME, 04921" ~ "Census Tract 470, Waldo County, Maine",
+                                       TRUE ~ full_census_tract)) %>%
+  separate(col = full_address, into = c("company", "address", "city", "state", "zip"), sep = ", ", remove = FALSE) %>% 
+  mutate(state = case_when(state == "CT" ~ "Connecticut",
+                           TRUE ~ state),
+         city = str_to_title(city),
+         city_state = paste(city, state, sep = " ")) %>% 
+  left_join(select(connecticut_city_county, city_state, county_name), by = "city_state") %>% 
+  mutate(county_name = case_when(city_state == "Kensington Connecticut" ~ "Hartford",
+                                 city_state == "Vernon Connecticut" ~ "Tolland",
+                                 city_state == "South Glastonbur Connecticut" ~ "Hartford",
+                                 TRUE ~ county_name)) %>% 
+         separate(col = full_census_tract, into = c("census_tract", "county", "state_name"), sep = ", ") %>% 
+         mutate(full_census_tract = case_when(state == "Connecticut" ~ paste(census_tract, county_name, state_name, sep = ", "),
+                                       TRUE ~ paste(census_tract, county, state_name, sep = ", "))) %>% 
+  select(-census_tract, -county, -state_name, -city_state, -county_name)
+
+
+```
+
+
+```{r,include=FALSE}
+### Prepping Data for Analysis
+#This dataframe is all rows with lat and long added
+original_vet_clinic_dat_with_lat_long <- raw_dat %>%
+  mutate("Zip (5)" = case_when(nchar(`Zip (5)`) == 4 ~ paste("0", `Zip (5)`, sep = ""),
+                         nchar(`Zip (5)`) == 5 ~ paste("", `Zip (5)`, sep = "")),
+         unique_identifier = paste(`Company`, `Address`, sep = ", "),
+         full_address = paste(unique_identifier, City, State, `Zip (5)`, sep = ", ")) %>%
+  left_join(select(geo_addresses_w_CT, lat, long, full_address), by = "full_address") %>%
+  left_join(select(other_geocoded_addresses, lat, long, full_address), by = "full_address") %>%
+  mutate(lat.x = coalesce(lat.x, lat.y),
+         long.x = coalesce(long.x, long.y)) %>%
+  rename(lat = "lat.x",
+         long = "long.x") %>%
+  select(-unique_identifier, -full_address, -lat.y, -long.y) %>% 
+  mutate(coordinates = paste(long, lat, sep = ", "))
+
+write_csv(original_vet_clinic_dat_with_lat_long, "original_vet_clinic_dat_with_lat_long.csv")
+
+#cleaned up dataframe for analysis
+
+unique_address_count <- all_clinics_dat %>%
+  mutate(unique_address = paste(Address, City, State, Zip, sep = ", ")) %>%
+  group_by(unique_address) %>%
+  summarise(clinics_at_address = n())
+
+num_vets_name_as_clinic_count <- all_clinics_dat %>%
+  mutate(unique_address = paste(Address, City, State, Zip, sep = ", ")) %>%
+  left_join(unique_address_count, by = "unique_address") %>%
+  filter(str_detect(str_to_lower(Company), "dvm") == TRUE) %>%
+  group_by(unique_address) %>%
+  summarise(num_vet_names = n())
+
+
+other_clinics_dat_base <- all_clinics_dat %>%
+  mutate(Zip = case_when(nchar(`Zip (5)`) == 4 ~ paste("0", `Zip (5)`, sep = ""),
+                         nchar(`Zip (5)`) == 5 ~ paste("", `Zip (5)`, sep = "")),
+         unique_identifier = paste(`Company`, `Address`, sep = ", "),
+         unique_address = paste(Address, City, State, Zip, sep = ", ")) %>%
+  distinct(unique_identifier, .keep_all = TRUE) %>%
+  mutate(full_address = paste(unique_identifier, City, State, Zip, sep = ", ")) %>%
+  filter(is.na(`Sunday Open`) == TRUE) %>%
+  left_join(other_geocoded_addresses, by = "full_address") %>% 
+  mutate(`Monday Close` = as.character(`Monday Close`))
+
+OC_vet_names_same_num <- other_clinics_dat_base %>%
+  left_join(unique_address_count, by = "unique_address") %>%
+  left_join(num_vets_name_as_clinic_count, by = "unique_address") %>%
+  replace_na(list(num_vet_names = 0)) %>%
+  mutate(diff_clinics_vet_names = clinics_at_address - num_vet_names) %>%
+  filter(diff_clinics_vet_names == 0 & clinics_at_address > 1) %>%
+  distinct(unique_address, .keep_all = TRUE)
+
+OC_vet_names_diff_num <- other_clinics_dat_base %>%
+  left_join(unique_address_count, by = "unique_address") %>%
+  left_join(num_vets_name_as_clinic_count, by = "unique_address") %>%
+  replace_na(list(num_vet_names = 0)) %>%
+  mutate(diff_clinics_vet_names = clinics_at_address - num_vet_names,
+         remove_row = case_when(clinics_at_address > 1 & diff_clinics_vet_names != 0 & str_detect(str_to_lower(Company), "dvm") == TRUE ~ TRUE,
+                                str_detect(str_to_lower(Company), " salon") == TRUE ~ TRUE,
+                                str_detect(str_to_lower(Company), "pet spa ") == TRUE ~ TRUE,
+                                num_commas == 1 ~ TRUE,
+
+                                TRUE ~ FALSE)) %>%
+  filter(remove_row == FALSE) %>%
+  select(-remove_row)
+
+other_clinics_final <- rbind(OC_vet_names_diff_num, OC_vet_names_same_num) %>%
+  mutate(exact_lat_long = case_when(num_commas == 2 ~ FALSE,
+                                    TRUE ~ TRUE),
+         hours_data = FALSE) %>%
+  select(`Address`, `City`, `State`, `State Description`, Zip, `Zipfour`, `Company`, `Number of Employees`, `Monday Open`, `Monday Close`,
+         `Tuesday Open`, `Tuesday Close`, `Wednesday Open`, `Wednesday Close`, `Thursday Open`, `Thursday Close`,
+         `Friday Open`, `Friday Close`, `Saturday Open`, `Saturday Close`, `Sunday Open`, `Sunday Close`, `Web Address`,
+         `Domain Name`, unique_identifier, unique_address, full_address, full_census_tract, lat, long, exact_lat_long, hours_data) %>%
+  left_join(select(vet_clinic_open_hours, full_address, Monday_Open_Date, Monday_Close_Date, Tuesday_Open_Date, Tuesday_Close_Date, Wednesday_Open_Date,
+                   Wednesday_Close_Date, Thursday_Open_Date, Thursday_Close_Date, Friday_Open_Date, Friday_Close_Date, Saturday_Open_Date,
+                   Saturday_Close_Date, Sunday_Open_Date, Sunday_Close_Date, total_monday_hours, total_tuesday_hours, total_wednesday_hours,
+                   total_thursday_hours, total_friday_hours, total_saturday_hours, total_sunday_hours, total_weekly_hours, total_weekend_hours,
+                   total_monday_hours_after_6pm, total_tuesday_hours_after_6pm, total_wednesday_hours_after_6pm, total_thursday_hours_after_6pm,
+                   total_friday_hours_after_6pm, total_saturday_hours_after_5pm, total_sunday_hours_after_5pm, total_monday_hours_after_8pm,
+                   total_tuesday_hours_after_8pm, total_wednesday_hours_after_8pm, total_thursday_hours_after_8pm, total_friday_hours_after_8pm,
+                   total_saturday_hours_after_8pm, total_sunday_hours_after_8pm, total_monday_hours_before_8am, total_tuesday_hours_before_8am,
+                   total_wednesday_hours_before_8am, total_thursday_hours_before_8am, total_friday_hours_before_8am, total_saturday_hours_before_8am,
+                   total_sunday_hours_before_8am, total_monday_hours_before_6am, total_tuesday_hours_before_6am, total_wednesday_hours_before_6am,
+                   total_thursday_hours_before_6am, total_friday_hours_before_6am, total_saturday_hours_before_6am, total_sunday_hours_before_6am,
+                   total_weekday_hours_after_6pm, total_weekend_hours_after_5pm, total_weekday_hours_after_8pm, total_weekend_hours_after_8pm,
+                   total_weekday_hours_before_8am, total_weekend_hours_before_8am, total_weekday_hours_before_6am, total_weekend_hours_before_6am,
+                   total_after_hours, total_emergency_hours, monday_normal_hours, tuesday_normal_hours, wednesday_normal_hours, thursday_normal_hours,
+                   friday_normal_hours, saturday_normal_hours, sunday_normal_hours, monday_limbo_time, tuesday_limbo_time, wednesday_limbo_time,
+                   thursday_limbo_time, friday_limbo_time, saturday_limbo_time, sunday_limbo_time, monday_after_hours, tuesday_after_hours,
+                   wednesday_after_hours, thursday_after_hours, friday_after_hours, saturday_after_hours, sunday_after_hours, monday_early_hours,
+                   tuesday_early_hours, wednesday_early_hours, thursday_early_hours, friday_early_hours, saturday_early_hours,
+                   sunday_early_hours, monday_emergency_hours, tuesday_emergency_hours, wednesday_emergency_hours, thursday_emergency_hours,
+                   friday_emergency_hours, saturday_emergency_hours, sunday_emergency_hours, no_24_hour_days, no_emergency_hours,
+                   no_outside_normal_hours, clinic_type, Monday_Open_st, Tuesday_Open_st, Wednesday_Open_st, Thursday_Open_st, Friday_Open_st,
+                   Saturday_Open_st, Sunday_Open_st, Monday_Close_st, Tuesday_Close_st, Wednesday_Close_st, Thursday_Close_st,
+                   Friday_Close_st, Saturday_Close_st, Sunday_Close_st), by = "full_address") %>% 
+  mutate(included_hours = FALSE,
+         coordinates = paste(long, lat, sep = ", "))
+
+VCOH_vet_names_same_num <- vet_clinic_open_hours %>%
+  left_join(unique_address_count, by = "unique_address") %>%
+  left_join(num_vets_name_as_clinic_count, by = "unique_address") %>%
+  replace_na(list(num_vet_names = 0)) %>%
+  mutate(diff_clinics_vet_names = clinics_at_address - num_vet_names) %>%
+  filter(diff_clinics_vet_names == 0 & clinics_at_address > 1) %>%
+  distinct(unique_address, .keep_all = TRUE)
+
+VCOH_vet_names_diff_num <- vet_clinic_open_hours %>%
+  left_join(unique_address_count, by = "unique_address") %>%
+  left_join(num_vets_name_as_clinic_count, by = "unique_address") %>%
+  replace_na(list(num_vet_names = 0)) %>%
+  mutate(diff_clinics_vet_names = clinics_at_address - num_vet_names,
+         remove_row = case_when(clinics_at_address > 1 & diff_clinics_vet_names != 0 & str_detect(str_to_lower(Company), "dvm") == TRUE ~ TRUE,
+                                str_detect(str_to_lower(Company), " salon") == TRUE ~ TRUE,
+                                str_detect(str_to_lower(Company), "pet spa ") == TRUE ~ TRUE,
+
+                                TRUE ~ FALSE)) %>%
+  filter(remove_row == FALSE) %>%
+  select(-remove_row)
+
+### Vet Clinic_hours_final has a different number of clinics because it took out some duplicate clinics.
+vet_clinic_hours_final <- rbind(VCOH_vet_names_diff_num, VCOH_vet_names_same_num) %>%
+  mutate(exact_lat_long = TRUE,
+         hours_data = TRUE) %>%
+  left_join(select(geo_addresses_w_CT, lat, long, full_census_tract, full_address), by = "full_address") %>%
+  select(-clinics_at_address, -num_vet_names, -diff_clinics_vet_names) %>% 
+  mutate(included_hours = TRUE) %>% 
+  mutate(coordinates = paste(long, lat, sep = ", "))
+
+all_clinics_cleaned_with_hours <- rbind(vet_clinic_hours_final, other_clinics_final) %>% 
+  select(-`Monday Open`, -`Tuesday Open`, -`Wednesday Open`, -`Thursday Open`, -`Friday Open`, -`Saturday Open`, -`Sunday Open`,
+         -`Monday Close`, -`Tuesday Close`, -`Wednesday Close`, -`Thursday Close`, -`Friday Close`, -`Saturday Close`, -`Sunday Close`, -unique_identifier,
+         -Monday_Open_Date, -Tuesday_Open_Date, -Wednesday_Open_Date, -Thursday_Open_Date, -Friday_Open_Date, -Saturday_Open_Date, -Sunday_Open_Date,
+         -Monday_Close_Date, -Tuesday_Close_Date, -Wednesday_Close_Date, -Thursday_Close_Date, -Friday_Close_Date, -Saturday_Close_Date, -Sunday_Close_Date,
+         -unique_address, -hours_data) %>% 
+  mutate(coordinates = paste(long, lat, sep = ", "))
+
+#write_csv(all_clinics_cleaned_with_hours, "vet_clinic_open_hours_cleaned.csv")
+
+###Desktop
+#setwd("C:/Users/john/Documents/GitHub_Data/VCAP-Open-Hours-Project-Data")
+
+###Laptop
+setwd("C:/Users/johnc/Documents/GitHub_Data/VCAP-Open-Hours-Project-Data")
+
+all_clinics_cleaned_with_hours <- read_csv("vet_clinic_open_hours_cleaned.csv") %>%
+  select(-...1)
+
+#Creating Counts by County
+
+total_population_20_county <- get_decennial(
+  geography = "county",
+  variables = "P1_001N",
+  year = 2020,
+  geometry = TRUE
+)
+
+us_counties_med_income <- get_acs(year = 2021, geography = "county", variables = c("B19013_001")) %>%
+  filter(str_detect(NAME, "Puerto Rico") == FALSE)
+
+
+us_counties_dat <- total_population_20_county %>%
+  separate(col = NAME, into = c("county_name", "state_name"), sep = ", ", remove = FALSE) %>%
+  rename(population_estimate = "value") %>%
+  left_join(select(us_counties_med_income, NAME, estimate, moe), by = "NAME") %>%
+  rename(median_income_estimate = "estimate",
+         median_income_moe = "moe")
+
+vet_clinic_base_table <- all_clinics_cleaned_with_hours %>%
+  separate(col = full_census_tract, into = c("tract_name", "county_name", "state_name"), sep = ", ") %>%
+  mutate(NAME = paste(county_name, state_name, sep = ", "))
+
+
+clinic_type_join_table <- vet_clinic_base_table %>%
+  group_by(NAME) %>%
+  count(clinic_type) %>%
+  pivot_wider(names_from = clinic_type, values_from = n) %>%
+  replace(is.na(.), 0) %>%
+  rename("Unknown" = "NA") %>%
+  relocate("24 Hour Clinic", .after = "Emergency Clinic") %>%
+  relocate("Unknown", .after = "24 Hour Clinic")
+
+text_clinic_type_join_table <- vet_clinic_base_table %>% 
+  group_by(NAME) %>% 
+  count(clinic_type_text) %>% 
+  pivot_wider(names_from = clinic_type_text, values_from = n) %>% 
+  replace(is.na(.), 0)
+
+
+hours_join_table <- vet_clinic_base_table %>%
+  replace_na(list(total_weekly_hours = 0, total_after_hours = 0, total_emergency_hours = 0)) %>%
+  group_by(NAME) %>%
+  summarise(total_open_hours = sum(total_weekly_hours),
+            total_after_hours = sum(total_after_hours),
+            total_emergency_hours = sum(total_emergency_hours))
+
+employees_count_join_table <- vet_clinic_base_table %>%
+  group_by(NAME) %>%
+  summarise(total_employees = sum(`Number of Employees`))
+
+
+num_vet_clinics_join_table <- vet_clinic_base_table %>%
+  group_by(NAME) %>%
+  summarise(total_vet_clinics = n())
+
+vet_clinic_hours_by_county <- us_counties_dat %>%
+  left_join(clinic_type_join_table, by = "NAME") %>%
+  left_join(text_clinic_type_join_table, by = "NAME") %>% 
+  left_join(hours_join_table, by = "NAME") %>%
+  left_join(employees_count_join_table, by = "NAME") %>%
+  left_join(num_vet_clinics_join_table, by = "NAME") %>%
+  replace(is.na(.), 0) %>%
+  filter(state_name != "Puerto Rico") %>%
+  select(-variable, -GEOID, -NAME) %>%
+  relocate(geometry, .after = total_emergency_hours) %>%
+  st_drop_geometry() %>%
+  mutate(LOCATION = paste(county_name, state_name, sep = ", ")) %>%
+  rename(normal_clinic = "Normal Clinic",
+         limbo_time_clinic = "Limbo Time Clinic",
+         outside_normal_hours_clinic = "Outside Normal Hours Clinic",
+         emergency_clinic = "Emergency Clinic",
+         twenty_four_hour_clinic = "24 Hour Clinic",
+         clinics_with_no_hours = "Unknown") %>%
+  relocate(total_vet_clinics, .after = clinics_with_no_hours) %>%
+  relocate(total_employees, .after = total_vet_clinics) %>%
+  left_join(select(total_population_20_county, NAME, geometry), by = c("LOCATION" = "NAME")) %>% 
+  mutate(HP10K = (total_open_hours/population_estimate) * 10000) %>% 
+  relocate(HP10K, .before = geometry)
+
+#write_csv(vet_clinic_hours_by_county, "vet_clinics_open_hours_by_county.csv")
+
+
+
+final_vet_clinic_by_county_with_svi <- SVI_Counties %>%
+  left_join(vet_clinic_hours_by_county, by = "LOCATION") %>%
+  select(7:182) %>%
+  relocate(county_name, .after = LOCATION) %>%
+  relocate(state_name, .after = county_name)
+
+#write_csv(final_vet_clinic_by_county_with_svi, "vet_clinics_open_hours_with_SVI_by_county.csv")
+
+# arc_gis_join_table <- SVI_Counties %>%
+#   left_join(vet_clinic_hours_by_county, by = "LOCATION") %>%
+#   select(LOCATION, 159:182) %>%
+#   mutate(OBJECTID = 1:3143)
+
+## Renaming column names for shape file
+
+shapefile_county_df <- final_vet_clinic_by_county_with_svi %>% 
+  rename(CNTY_NAME = "county_name",
+         STATE_NAME = "state_name",
+         EP_OTHRACE = "EP_OTHERRACE",
+         MP_OTHRACE = "MP_OTHERRACE",
+         EPL_UNINSR = "EPL_UNINSUR",
+         E_OTHRACE = "E_OTHERRACE",
+         M_OTHRACE = "M_OTHERRACE",
+         POP_EST = "population_estimate",
+         MD_INC = "median_income_estimate",
+         MD_INC_E = "median_income_moe",
+         NOR_CLNC = "normal_clinic",
+         LMBO_CLNC = "limbo_time_clinic",
+         OHN_CLNC = "outside_normal_hours_clinic",
+         ER_CLNC = "emergency_clinic",
+         TWFR_CLNC = "twenty_four_hour_clinic",
+         NO_HR_CLNC = "clinics_with_no_hours",
+         TTL_CLNC = "total_vet_clinics",
+         TTL_EMPL = "total_employees",
+         GEN_CARE = "General/Primary",
+         ER_CARE = "Emergency Care",
+         LOW_CARE = "Low Cost",
+         MB_HM_CARE = "Mobile/Home Care",
+         FARM_CARE = "Farm/Large Animal",
+         SPCL_CARE = "Specialty Care",
+         TTL_HRS = "total_open_hours",
+         TTL_AF_HRS = "total_after_hours",
+         TTL_ER_HRS = "total_emergency_hours",
+         GEOMETRY = "geometry")
+
+
+shapefile_vet_clinics_df <- all_clinics_cleaned_with_hours %>% 
+  select(-Zipfour, -"Web Address", -"Domain Name") %>%
+  rename(state_name = "State Description",
+         clnc_name = "Company_x",
+         num_emp = "Number of Employees",
+         address_uq = "full_address",
+         ttl_hrs = "total_weekly_hours",
+         ttl_wkd_hr = "total_weekend_hours",
+         ttl_afr_hr = "total_after_hours",
+         ttl_er_hrs = "total_emergency_hours",
+         clnc_type = "clinic_type",
+         clnc_care = "clinic_type_text",
+         exact_xy = "exact_lat_long",
+         tract = "full_census_tract",
+         incld_hrs = "included_hours",
+         GEOMETRY = "coordinates") %>% 
+  select("Address","City","State",Zip, state_name, clnc_name, num_emp, address_uq, ttl_hrs, ttl_wkd_hr, ttl_afr_hr, ttl_er_hrs, clnc_type, clnc_care, exact_xy, tract, incld_hrs, lat, long)
+
+for (i in 1:nrow(shapefile_vet_clinics_df)) {
+  # Extract latitude and longitude for the current row
+  current_lat = pull(shapefile_vet_clinics_df[i, 'lat'])
+  current_long = pull(shapefile_vet_clinics_df[i, 'long'])
+  geometry = st_sfc(st_point(c(current_long, current_lat)), crs = 4326)
+  
+  
+  lat_vector <- c(lat_vector, current_lat)
+  long_vector <- c(long_vector, current_long)
+  geometry_vector <- c(geometry_vector, geometry)
+  
+}
+
+  
+shapefile_vet_clinics_df$GEOMETRY = geometry_vector         
+
+#st_write(shapefile_county_df, "vet_clinics_by_county_with_SVI.shp", append = FALSE)
+st_write(shapefile_vet_clinics_df, "vet_clinics.shp", append = FALSE)
+
+
+```
+### Data Analysis and Visualizations
+
+### General Clinic Information
+
+There are 35999 rows in the vet clinic data set. There are 32534 unique vet clinics. The total number of clinics with hours is 23,637. There were some duplicate instances where a clinic would have multiple clinics at the same location. Sometimes it was because of different specialty clinics were offered at the location, other times it was because a veterinarian was being counted as a clinic. I removed the veterinarians in these instances. This brought our total number of  clinics with hours down to 23,525. 
+
+To start, lets take a look at the count of Open times for each day. Keep in mind, for the first four graphics, only the hour is reported. 7:45 = 7.
+
+
+```{r, fig.height = 10, fig.width = 6, echo=FALSE}
+
+open_hours_bargraph <- vet_clinic_hours_final %>% 
+  rename(Monday = Monday_Open_st,
+         Tuesday = Tuesday_Open_st,
+         Wednesday = Wednesday_Open_st,
+         Thursday = Thursday_Open_st,
+         Friday = Friday_Open_st,
+         Saturday = Saturday_Open_st,
+         Sunday = Sunday_Open_st) %>% 
+  pivot_longer(cols = c(Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday),
+               names_to = "Day",
+               values_to = "Time") %>% 
+  replace_na(list(Time = "Closed")) %>%
+  mutate(hour = sapply(strsplit(Time, ":"), `[`, 1),
+         AM_or_PM = sapply(strsplit(sapply(strsplit(Time, ":"), `[`, 2), " "), `[`, 2)) %>% 
+  replace_na(list(AM_or_PM = "")) %>% 
+  mutate(hour_am_pm = paste(hour, AM_or_PM, sep = " ")) 
+  #%>% 
+  #group_by(Day, hour) %>% 
+  #summarise(Count = n())
+
+am_open_hours <- open_hours_bargraph %>% 
+  filter(str_detect(hour_am_pm, "AM") == TRUE | str_detect(hour_am_pm, "Closed") == TRUE)
+
+pm_open_hours <- open_hours_bargraph %>% 
+  filter(str_detect(hour_am_pm, "PM") == TRUE | str_detect(hour_am_pm, "Closed") == TRUE)
+
+```
+
+
+
+
+### Open Times
+Count of Open times by Day
+```{r, fig.height = 12, fig.width = 8, echo=FALSE, warning = FALSE}
+ggplot(data = am_open_hours, aes(x = hour_am_pm)) +
+  geom_bar(fill = "lightblue") +
+  facet_wrap(~factor(Day, levels=c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')), ncol = 1, scales = "free") +
+  geom_text(aes(label = percent(..count../nrow(vet_clinic_hours_final), accuracy = 4)), stat = "count")
+  #scale_x_discrete(limits = ordered_open_time_list) #+
+  #coord_flip()#+
+
+```
+
+
+
+
+
+```{r, fig.height = 12, fig.width = 8, echo=FALSE, warning = FALSE}
+
+ggplot(data = pm_open_hours, aes(x = hour_am_pm)) +
+  geom_bar(fill = "lightblue") +
+  facet_wrap(~factor(Day, levels=c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')), ncol = 1, scales = "free") +
+  geom_text(aes(label = percent(..count../nrow(vet_clinic_hours_final), accuracy = 0.09)), stat = "count")
+   
+  
+  
+
+
+```
+
+* Monday, 88% of clinics open between 7 and 9:59 am
+* Tuesday, 92% of clinics open between 7 and 9:59 am
+* Wednesday, 88% of clinics open between 7 and 9:59 am
+* Thursday, 88% of clinics open between 7 and 9:59 am
+* Friday, 92% of clinics open between 7 and 9:59 am
+* Saturday, 64% of clinics open between 7 and 9:59 am
+* Sunday, 84% of clinics are CLOSED
+
+### Close Times
+Count of Close times by Day
+```{r, fig.height = 12, fig.width = 8, echo=FALSE, warning = FALSE}
+
+
+close_hours_bargraph <- vet_clinic_hours_final %>% 
+  rename(Monday = Monday_Close_st,
+         Tuesday = Tuesday_Close_st,
+         Wednesday = Wednesday_Close_st,
+         Thursday = Thursday_Close_st,
+         Friday = Friday_Close_st,
+         Saturday = Saturday_Close_st,
+         Sunday = Sunday_Close_st) %>% 
+  pivot_longer(cols = c(Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday),
+               names_to = "Day",
+               values_to = "Time") %>% 
+  replace_na(list(Time = "Closed")) %>%
+  mutate(hour = sapply(strsplit(Time, ":"), `[`, 1),
+         AM_or_PM = sapply(strsplit(sapply(strsplit(Time, ":"), `[`, 2), " "), `[`, 2)) %>% 
+  replace_na(list(AM_or_PM = "")) %>% 
+  mutate(hour_am_pm = paste(hour, AM_or_PM, sep = " ")) 
+  #%>% 
+  #group_by(Day, hour) %>% 
+  #summarise(Count = n())
+
+am_close_hours <- close_hours_bargraph %>% 
+  filter(str_detect(hour_am_pm, "AM") == TRUE | str_detect(hour_am_pm, "Closed") == TRUE)
+
+pm_close_hours <- close_hours_bargraph %>% 
+  filter(str_detect(hour_am_pm, "PM") == TRUE | str_detect(hour_am_pm, "Closed") == TRUE)
+
+```
+
+
+```{r, fig.height = 12, fig.width = 8, echo=FALSE, warning = FALSE}
+#  
+ggplot(data = am_close_hours, aes(x = hour_am_pm)) +
+  geom_bar(fill = "gray") +
+  facet_wrap(~factor(Day, levels=c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')), ncol = 1, scales = "free") +
+  geom_text(aes(label = percent(..count../nrow(vet_clinic_hours_final), accuracy = 0.01)), stat = "count")
+  #scale_x_discrete(limits = ordered_open_time_list) #+
+  #coord_flip()#+
+
+```
+
+
+```{r, fig.height = 12, fig.width = 8, echo=FALSE, warning = FALSE}
+
+ggplot(data = pm_close_hours, aes(x = hour_am_pm)) +
+  geom_bar(fill = "gray") +
+  facet_wrap(~factor(Day, levels=c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')), ncol = 1, scales = "free") +
+  geom_text(aes(label = percent(..count../nrow(vet_clinic_hours_final), accuracy = 1)), stat = "count")
+  
+
+```
+
+* Monday, 82% Close between 5 and 7:59 PM
+* Tuesday, 84% Close between 5 and 7:59 PM
+* Wednesday, 78% Close between 5 and 7:59 PM
+* Thursday, 81% Close between 5 and 7:59 PM
+* Friday, 82% Close between 5 and 7:59 PM
+* Saturday, 26% Close between 12 PM and 12:59 PM
+* Sunday, 86% of clinics are CLOSED
+
+
+
+
+### Table of Open and Close hours for different days of the Week
+
+For week days, about 80% of the clinics open between 7 and 9 and about 80% close between 5 - 8 PM
+
+```{r, echo=FALSE}
+### Creating Weekday Open Times Table in Rmarkdown
+
+friday_open_times <- createTimeDF(vet_clinic_hours_final, Friday_Open_st) 
+
+thursday_open_times <- createTimeDF(vet_clinic_hours_final, Thursday_Open_st)
+
+wednesday_open_times <- createTimeDF(vet_clinic_hours_final, Wednesday_Open_st)
+
+tuesday_open_times <- createTimeDF(vet_clinic_hours_final, Tuesday_Open_st)
+
+## This shows mondays top ten and then the numbers for the other days.
+weekday_open_times <- vet_clinic_hours_final %>% 
+  group_by(Monday_Open_st) %>% 
+  summarise(Count = n()) %>% 
+  replace_na(list(Monday_Open_st = "Closed")) %>% 
+  mutate(Percent = round(Count/nrow(vet_clinic_hours_final), 4)*100) %>% 
+  arrange(desc(Count)) %>% 
+  slice_head(n=10) %>% 
+  left_join(tuesday_open_times, by = c("Monday_Open_st" = "Tuesday_Open_st")) %>% 
+  rename("Time" = Monday_Open_st, `Monday Count` = Count.x, `Monday Percent` = Percent.x, `Tuesday Count` = Count.y, `Tuesday Percent` = Percent.y) %>% 
+  left_join(wednesday_open_times, by = c("Time" = "Wednesday_Open_st")) %>% 
+  rename(`Wednesday Count` = Count, `Wednesday Percent` = Percent) %>% 
+  left_join(thursday_open_times, by = c("Time" = "Thursday_Open_st")) %>% 
+  rename(`Thursday Count` = Count, `Thursday Percent` = Percent) %>% 
+  left_join(friday_open_times, by = c("Time" = "Friday_Open_st")) %>% 
+  rename(`Friday Count` = Count, `Friday Percent` = Percent) %>% 
+  select(-`Monday Count`, -`Tuesday Count`, -`Wednesday Count`, -`Thursday Count`, -`Friday Count`)
+
+### Creating Weekdays Close time 
+friday_close_times <- createTimeDF(vet_clinic_hours_final, Friday_Close_st)
+
+thursday_close_times <- createTimeDF(vet_clinic_hours_final, Thursday_Close_st)
+
+wednesday_close_times <- createTimeDF(vet_clinic_hours_final, Wednesday_Close_st)
+
+tuesday_close_times <- createTimeDF(vet_clinic_hours_final, Tuesday_Close_st)
+
+
+#Top ten for monday and the counts for other days
+weekday_close_times <- vet_clinic_hours_final %>% 
+  group_by(Monday_Close_st) %>% 
+  summarise(Count = n()) %>% 
+  replace_na(list(Monday_Close_st = "Closed")) %>% 
+  mutate(Percent = round(Count/nrow(vet_clinic_hours_final), 4)*100) %>% 
+  arrange(desc(Count)) %>% 
+  slice_head(n=10) %>% 
+  left_join(tuesday_close_times, by = c("Monday_Close_st" = "Tuesday_Close_st")) %>% 
+  rename("Time" = Monday_Close_st, `Monday Count` = Count.x, `Monday Percent` = Percent.x, `Tuesday Count` = Count.y, `Tuesday Percent` = Percent.y) %>% 
+  left_join(wednesday_close_times, by = c("Time" = "Wednesday_Close_st")) %>% 
+  rename(`Wednesday Count` = Count, `Wednesday Percent` = Percent) %>% 
+  left_join(thursday_close_times, by = c("Time" = "Thursday_Close_st")) %>% 
+  rename(`Thursday Count` = Count, `Thursday Percent` = Percent) %>% 
+  left_join(friday_close_times, by = c("Time" = "Friday_Close_st")) %>% 
+  rename(`Friday Count` = Count, `Friday Percent` = Percent) %>% 
+  select(-`Monday Count`, -`Tuesday Count`, -`Wednesday Count`, -`Thursday Count`, -`Friday Count`)
+
+
+saturday_open_times <- createTimeDF(vet_clinic_hours_final, Saturday_Open_st) %>%
+  rename(Time = Saturday_Open_st, `Saturday Count` = Count, `Saturday Percent` = Percent) %>% 
+  slice_head(n=10)
+
+saturday_close_times <- createTimeDF(vet_clinic_hours_final, Saturday_Close_st) %>% 
+  rename(Time = Saturday_Close_st, `Saturday Count` = Count, `Saturday Percent` = Percent) %>% 
+  slice_head(n=10)
+
+sunday_open_times <- createTimeDF(vet_clinic_hours_final, Sunday_Open_st) %>% 
+  rename(Time = Sunday_Open_st, `Sunday Count` = Count, `Sunday Percent` = Percent) %>% 
+  slice_head(n=10)
+
+sunday_close_times <-createTimeDF(vet_clinic_hours_final, Sunday_Close_st) %>% 
+  rename(Time = Sunday_Close_st, `Sunday Count` = Count, `Sunday Percent` = Percent) %>% 
+  slice_head(n=10)
+
+knitr::kable(weekday_open_times, caption = "Opening Times for Weekdays")
+
+knitr::kable(weekday_close_times, caption = "Closing Times for Weekdays")
+
+```
+
+
+For Saturday, most of the open hours open at 8 or 9 and close at 12, 1, or 2 PM
+```{r, echo=FALSE, warning=FALSE}
+
+knitr::kable(saturday_open_times, caption = "Opening Times for Saturday")
+
+knitr::kable(saturday_close_times, caption = "Closing Times for Saturday")
+
+```
+
+
+For Sunday, 85% are closed. The next most common hours refer to 24 hour clinics
+```{r, echo=FALSE, warning=FALSE}
+
+knitr::kable(sunday_open_times, caption = "Opening Times for Sunday")
+
+knitr::kable(sunday_close_times, caption = "Closing Times for Sunday")
+
+```
+
+
+
+
+```{r, echo=FALSE, warning=FALSE}
+# hours_of_operation <- vet_clinic_open_hours %>% 
+#   mutate(Monday_Open_Close = paste(Monday_Open_st, Monday_Close_st, sep = "-"),
+#          Tuesday_Open_Close = paste(Tuesday_Open_st, Tuesday_Close_st, sep = "-"),
+#          Wednesday_Open_Close = paste(Wednesday_Open_st, Wednesday_Close_st, sep = "-"),
+#          Thursday_Open_Close = paste(Thursday_Open_st, Thursday_Close_st, sep = "-"),
+#          Friday_Open_Close = paste(Friday_Open_st, Friday_Close_st, sep = "-"),
+#          Saturday_Open_Close = paste(Saturday_Open_st, Saturday_Close_st, sep = "-"),
+#          Sunday_Open_Close = paste(Sunday_Open_st, Sunday_Close_st, sep = "-")) 
+# 
+# 
+# monday_hours_operation <- hours_of_operation %>%
+#   group_by(Monday_Open_Close) %>% 
+#   summarise(Count = n()) %>%
+#   mutate(Monday_Open_Close = case_when(Monday_Open_Close == "NA-NA" ~ "Closed",
+#                                        TRUE ~ Monday_Open_Close),
+#          Percent = percent(Count/nrow(hours_of_operation), accuracy = 0.01)) %>% 
+#   arrange(desc(Count)) %>%
+#   slice_head(n=10)
+# 
+# tuesday_hours_operation <- hours_of_operation %>%
+#   group_by(Tuesday_Open_Close) %>% 
+#   summarise(Count = n()) %>%
+#   mutate(Tuesday_Open_Close = case_when(Tuesday_Open_Close == "NA-NA" ~ "Closed",
+#                                        TRUE ~ Tuesday_Open_Close),
+#          Percent = percent(Count/nrow(hours_of_operation), accuracy = 0.01)) %>% 
+#   arrange(desc(Count)) %>%
+#   slice_head(n=10)
+# 
+# wednesday_hours_operation <- hours_of_operation %>%
+#   group_by(Wednesday_Open_Close) %>% 
+#   summarise(Count = n()) %>%
+#   mutate(Wednesday_Open_Close = case_when(Wednesday_Open_Close == "NA-NA" ~ "Closed",
+#                                        TRUE ~ Wednesday_Open_Close),
+#          Percent = percent(Count/nrow(hours_of_operation), accuracy = 0.01)) %>% 
+#   arrange(desc(Count)) %>%
+#   slice_head(n=10)
+# 
+# 
+# thursday_hours_operation <- hours_of_operation %>%
+#   group_by(Thursday_Open_Close) %>% 
+#   summarise(Count = n()) %>%
+#   mutate(Thursday_Open_Close = case_when(Thursday_Open_Close == "NA-NA" ~ "Closed",
+#                                        TRUE ~ Thursday_Open_Close),
+#          Percent = percent(Count/nrow(hours_of_operation), accuracy = 0.01)) %>% 
+#   arrange(desc(Count)) %>%
+#   slice_head(n=10)
+# 
+# friday_hours_operation <- hours_of_operation %>%
+#   group_by(Friday_Open_Close) %>% 
+#   summarise(Count = n()) %>%
+#   mutate(Friday_Open_Close = case_when(Friday_Open_Close == "NA-NA" ~ "Closed",
+#                                        TRUE ~ Friday_Open_Close),
+#          Percent = percent(Count/nrow(hours_of_operation), accuracy = 0.01)) %>% 
+#   arrange(desc(Count)) %>%
+#   slice_head(n=10)
+# 
+# saturday_hours_operation <- hours_of_operation %>%
+#   group_by(Saturday_Open_Close) %>% 
+#   summarise(Count = n()) %>%
+#   mutate(Saturday_Open_Close = case_when(Saturday_Open_Close == "NA-NA" ~ "Closed",
+#                                        TRUE ~ Saturday_Open_Close),
+#          Percent = percent(Count/nrow(hours_of_operation), accuracy = 0.01)) %>% 
+#   arrange(desc(Count)) %>%
+#   slice_head(n=10)
+# 
+# 
+# sunday_hours_operation <- hours_of_operation %>%
+#   group_by(Sunday_Open_Close) %>% 
+#   summarise(Count = n()) %>%
+#   mutate(Sunday_Open_Close = case_when(Sunday_Open_Close == "NA-NA" ~ "Closed",
+#                                        TRUE ~ Sunday_Open_Close),
+#          Percent = percent(Count/nrow(hours_of_operation), accuracy = 0.01)) %>% 
+#   arrange(desc(Count))%>%
+#   slice_head(n=10)
+# 
+# knitr::kable(monday_hours_operation, caption = "Monday Common Hours of Operation")
+# 
+# knitr::kable(tuesday_hours_operation, caption = "Tuesday Common Hours of Operation")
+# 
+# knitr::kable(wednesday_hours_operation, caption = "Wednesday Common Hours of Operation")
+# 
+# knitr::kable(thursday_hours_operation, caption = "Thursday Common Hours of Operation")
+# 
+# knitr::kable(friday_hours_operation, caption = "Friday Common Hours of Operation")
+# 
+# knitr::kable(saturday_hours_operation, caption = "Saturday Common Hours of Operation")
+# 
+# knitr::kable(sunday_hours_operation, caption = "Sunday Common Hours of Operation")
+
+```
+
+
+### Hours of Operation Box Plot
+
+```{r, echo=FALSE, warning=FALSE}
+hours_operation_boxplot <- vet_clinic_hours_final %>% 
+  rename("Monday" = total_monday_hours, "Tuesday" = total_tuesday_hours, "Wednesday" = total_wednesday_hours, "Thursday" = total_thursday_hours, "Friday" = total_friday_hours, "Saturday" = total_saturday_hours, "Sunday" = total_sunday_hours) %>% 
+  pivot_longer(cols = c(Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday),
+               names_to = "Day",
+               values_to = "time_open")
+
+
+
+ggplot(data = hours_operation_boxplot) +
+  geom_boxplot(aes(x = Day, y = time_open))
+
+```
+
+
+Summary of total weekly hours and standard deviation
+```{r, echo=FALSE, warning=FALSE}
+
+summary(vet_clinic_hours_final$total_weekly_hours)
+print("Standard Deviation")
+sd(vet_clinic_hours_final$total_weekly_hours)
+
+```
+
+Most Clinics only offer about 60 hours or less of operation for the entire week.
+
+
+summary of total weekend hours and standard deviation
+```{r,echo=FALSE, warning=FALSE}
+summary(vet_clinic_hours_final$total_weekend_hours)
+print("Standard Deviation")
+sd(vet_clinic_hours_final$total_weekend_hours)
+
+
+```
+Most Clinics only offer about 6 and a half hours or less of operation on the weekend.
+
+### Hours of Clinics by State
+
+```{r, echo=FALSE, warning=FALSE}
+census_api_key("23637b14801277ff7fd4a00c18312b1b66c2e1a5", overwrite = FALSE, install = FALSE)
+
+#get_decennial(table = load_variables(cache = TRUE))
+
+#total_population_10 <- get_decennial(
+#  geography = "state", 
+#  variables = "P001001",
+#  year = 2010
+#)
+
+total_population_20 <- get_decennial(
+  geography = "state",
+  variables = "P1_001N",
+  year = 2020
+)
+
+all_clinics_by_state <- all_clinics_dat %>%
+  mutate(state = case_when(`State Description`== "DISTRICT OF COLUMBIA" ~ "District of Columbia",
+                                TRUE ~ str_to_title(`State Description`))) %>% 
+  group_by(state) %>% 
+  summarise(Count = n()) %>%
+  left_join(total_population_20, by = c("state" = "NAME")) %>% 
+  mutate(adjusted_population = (Count/value) * 50000)
+  
+
+
+clinics_by_state <- vet_clinic_hours_final %>%
+  mutate(state = case_when(`State Description`== "DISTRICT OF COLUMBIA" ~ "District of Columbia",
+                                TRUE ~ str_to_title(`State Description`))) %>% 
+  group_by(state) %>% 
+  summarise(Count = n()) %>%
+  left_join(total_population_20, by = c("state" = "NAME")) %>% 
+  mutate(adjusted_population = (Count/value) * 50000)
+
+num_employees_by_state <- all_clinics_dat %>%
+  mutate(state = case_when(`State Description`== "DISTRICT OF COLUMBIA" ~ "District of Columbia",
+                                TRUE ~ str_to_title(`State Description`))) %>% 
+  group_by(state) %>% 
+  summarise(number_of_clinics = n(),
+            total_employees = sum(`Number of Employees`),
+            employees_per_clinic = total_employees/number_of_clinics)
+
+hours_by_state <- vet_clinic_hours_final %>% 
+  mutate(state = case_when(`State Description`== "DISTRICT OF COLUMBIA" ~ "District of Columbia",
+                                TRUE ~ str_to_title(`State Description`))) %>% 
+  group_by(state) %>% 
+  summarise(Hours = sum(total_weekly_hours)) %>%
+  left_join(total_population_20, by = c("state" = "NAME")) %>% 
+  mutate(adjusted_for_pop = (Hours/value) * 10000)
+  
+
+
+Q1 <- quantile(num_employees_by_state$employees_per_clinic, .25)
+Q3 <- quantile(num_employees_by_state$employees_per_clinic, .75)
+IQR <- IQR(num_employees_by_state$employees_per_clinic)
+
+low_bound_outliers <- round((Q1 - 1.5*IQR))
+up_bond_outliers <- round((Q3 + 1.5*IQR))
+
+
+num_employees_by_state$norm_employees_per_clinic <- num_employees_by_state$employees_per_clinic
+
+num_employees_by_state$norm_employees_per_clinic[num_employees_by_state$norm_employees_per_clinic < low_bound_outliers] <- low_bound_outliers
+num_employees_by_state$norm_employees_per_clinic[num_employees_by_state$norm_employees_per_clinic > up_bond_outliers] <- up_bond_outliers
+
+  
+
+library(usmap)
+library(ggplot2)
+
+#Hours
+
+hours_map <- plot_usmap(data = hours_by_state, values = "Hours", color = "black") +
+  scale_fill_continuous(
+    low = "red", high = "green", name = "Total Weekly Hours", label = scales::comma)+
+  theme(legend.position = "right") +
+  labs(title = "Total Vet Clinic Hours by State")
+
+
+hours_map_adjusted <- plot_usmap(data = hours_by_state, values = "adjusted_for_pop", color = "black") +
+  scale_fill_continuous(
+    low = "red", high = "green", name = "Total Weekly Hours", label = scales::comma)+
+  theme(legend.position = "right") +
+  labs(title = "Total Vet Clinic Hours by State per 10,000 people")
+
+# 
+# #Counts
+# plot_usmap(data = clinics_by_state, values = "Count", color = "black") + 
+#   scale_fill_continuous(
+#     low = "red", high = "green", name = "Count of Clinics", label = scales::comma
+#   ) + theme(legend.position = "right")+
+#   labs(title = "Count of Open Hour Clinics by State",
+#        subtitle = "This map only includes clincs with hours listed. A total of 23,637 clinics")
+# 
+# plot_usmap(data = all_clinics_by_state, values = "Count", color = "black") + 
+#   scale_fill_continuous(
+#     low = "red", high = "green", name = "Count of Clinics", label = scales::comma
+#   ) + theme(legend.position = "right") +
+#   labs(title = "Count of All Clinics by State",
+#        subtitle = "This map included all clinics, those with hours listed and those without hours listed. A total of 32,534 Clinics")
+# 
+# 
+# 
+# plot_usmap(data = clinics_by_state, values = "adjusted_population", color = "black") + 
+#   scale_fill_continuous(
+#     low = "red", high = "green", name = "clincs/population", label = scales::comma
+#   ) + theme(legend.position = "right")+
+#   labs(title = "Number of Clinics W/Hours per 50,000 People by State",
+#        subtitle = "This map only includes clincs with hours listed. A total of 23,637 clinics")
+# 
+# plot_usmap(data = all_clinics_by_state, values = "adjusted_population", color = "black") + 
+#   scale_fill_continuous(
+#     low = "red", high = "green", name = "clinics/population", label = scales::comma
+#   ) + theme(legend.position = "right") +
+#   labs(title = "Number of all Clinics per 50,000 People by State",
+#        subtitle = "This map included all clinics, those with hours listed and those without hours listed. A total of 32,534 Clinics")
+# 
+# 
+# 
+# plot_usmap(data = num_employees_by_state, values = "employees_per_clinic", color = "black")+
+#   scale_fill_continuous(
+#     low = "red", high = "green", name = "Employees Per Clinic", label = scales::comma) +
+#   theme(legend.position = "right")+
+#   labs(title = "Employees Per Clinic by State")
+
+employee_norm_map <- plot_usmap(data = num_employees_by_state, values = "norm_employees_per_clinic", color = "black")+
+  scale_fill_continuous(
+    low = "red", high = "green", name = "Normalized Employees Per Clinic", label = scales::comma) +
+  theme(legend.position = "right")+
+  labs(title = "Employees Per Clinic by State",
+       subtitle = "Outliers were replaced with Quantile 3 + 1.5 x IQR")
+
+
+hours_map
+
+hours_map_adjusted
+
+employee_norm_map
+
+
+
+
+```
+
+```{r, echo=FALSE, warning=FALSE}
+
+clinics_lost_by_state <- clinics_by_state %>% 
+  left_join(all_clinics_by_state, by = "state") %>% 
+  rename(clinics_w_hours = Count.x, all_clinics = Count.y) %>% 
+  mutate(percent_lost = percent((all_clinics - clinics_w_hours)/all_clinics, accuracy = 0.01),
+         percent_float = (all_clinics - clinics_w_hours)/all_clinics) %>%
+  arrange(desc(percent_float)) %>% 
+  select(state, clinics_w_hours, all_clinics, percent_lost) %>% 
+  left_join(select(clinics_by_state, adjusted_population, state), by = "state")
+
+#knitr::kable(clinics_lost_by_state, caption = "Percent of Clinics WO Hours by State", align = c("l","c","c","l"))
+
+```
+
+
+### Clinics by Type Breakdown
+
+Definitions of Clinic Types
+
+***Normal Clinics***: A normal clinic is defined as any clinic that is open at least 1 day for at least 1 consecutive hour between 8:00 AM and 5:00 PM Monday through Friday.
+
+***Limbo Clinics***: A Clinic that offers hours after 5:00 PM on at least 1 day, but not for a consecutive hour after 6:00 PM.
+
+***Outside Normal Hours Clinic***: An Outside Normal Hours Clinic is defined as any clinic that is open at least 1 day for at least 1 consecutive hour after 6:00 PM and before 8:00 PM on weekdays, after 6:00 AM and before 8:00 AM on weekdays, or between 8:00 AM and 5:00 PM on the weekends.
+
+***Emergency Clinics***: An Emergency Clinic is defined as any clinic that is open at least 1 day for at least 1 consecutive hour after 8:00 PM and before 6:00 AM on weekdays, after 5:00 PM on weekends, and before 8:00 AM on weekends.
+
+***24 Hour Clinic***: A 24 hour clinics is defined as any clinic that is open at least 1 day for more than 23 hours
+
+You will notice that I used days count metric for looking at hours of operation
+
+### Table of Clinic Type Counts
+
+```{r, warning=FALSE, echo=FALSE}
+
+knitr::kable(table(vet_clinic_hours_final$clinic_type))
+
+```
+
+### Normal Hour Clinics 
+
+```{r, echo=FALSE, warning=FALSE}
+
+normal_clinics <- vet_clinic_hours_final %>% 
+  filter(clinic_type == 'Normal Clinic') 
+
+normal_clinics_hours_operation <- normal_clinics %>% 
+  mutate(Monday_Open_Close = paste(Monday_Open_st, Monday_Close_st, sep = "-"),
+         Tuesday_Open_Close = paste(Tuesday_Open_st, Tuesday_Close_st, sep = "-"),
+         Wednesday_Open_Close = paste(Wednesday_Open_st, Wednesday_Close_st, sep = "-"),
+         Thursday_Open_Close = paste(Thursday_Open_st, Thursday_Close_st, sep = "-"),
+         Friday_Open_Close = paste(Friday_Open_st, Friday_Close_st, sep = "-")) 
+
+
+monday_normal_hours_operation <- normal_clinics_hours_operation %>%
+  select(`Monday Open`, `Monday Close`, Monday_Open_Close)
+
+tuesday_normal_hours_operation <- normal_clinics_hours_operation %>%
+  select(`Tuesday Open`, `Tuesday Close`, Tuesday_Open_Close)
+
+wednesday_normal_hours_operation <- normal_clinics_hours_operation %>%
+  select(`Wednesday Open`, `Wednesday Close`, Wednesday_Open_Close)
+
+thursday_normal_hours_operation <- normal_clinics_hours_operation %>%
+  select(`Thursday Open`, `Thursday Close`, Thursday_Open_Close)
+
+friday_normal_hours_operation <- normal_clinics_hours_operation %>%
+  select(`Friday Open`, `Friday Close`, Friday_Open_Close)
+
+normal_count_join_table <- stack(normal_clinics_hours_operation[149:153]) %>% 
+  group_by(values) %>% 
+  summarise(`Days Count` = n()) %>% 
+  mutate(values = case_when(values == "NA-NA" ~ "Closed",
+                            TRUE ~ values)) %>% 
+  filter(values != "Closed")
+
+total_days_normal_clinics_op = sum(normal_count_join_table$`Days Count`)
+
+
+normal_clinics_hours_list <- stack(normal_clinics_hours_operation[149:153]) %>% 
+  distinct(values) %>% 
+  left_join(monday_normal_hours_operation, by = c("values" = "Monday_Open_Close")) %>%
+  rename(Open = `Monday Open`, Close = `Monday Close`) %>% 
+  left_join(tuesday_normal_hours_operation, by = c("values" = "Tuesday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Tuesday Open`),
+         Close = coalesce(Close, `Tuesday Close`)) %>% 
+  select(-`Tuesday Open`, -`Tuesday Close`) %>% 
+  left_join(wednesday_normal_hours_operation, by = c("values" = "Wednesday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Wednesday Open`),
+         Close = coalesce(Close, `Wednesday Close`)) %>% 
+  select(-`Wednesday Open`, -`Wednesday Close`) %>% 
+  left_join(thursday_normal_hours_operation, by = c("values" = "Thursday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Thursday Open`),
+         Close = coalesce(Close, `Thursday Close`)) %>% 
+  select(-`Thursday Open`, -`Thursday Close`) %>% 
+  left_join(friday_normal_hours_operation, by = c("values" = "Friday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Friday Open`),
+         Close = coalesce(Close, `Friday Close`)) %>% 
+  select(-`Friday Open`, -`Friday Close`) %>% 
+  drop_na() %>%
+  left_join(normal_count_join_table, by = "values") %>% 
+  arrange(desc(`Days Count`)) %>% 
+  slice_head(n = 10) %>% 
+  mutate(Percent = percent(`Days Count`/total_days_normal_clinics_op, accuracy = 0.01)) %>% 
+  select(values, `Days Count`, Percent)
+
+knitr::kable(normal_clinics_hours_list, caption = "Top Ten Normal Clinic Hours Operation", align = c("l", "c", "r"))
+
+```
+
+
+### Limbo Time Clinics
+
+Limbo Time clinics will include normal hours as well because they may have only 1 or 2 days that offer limbo time hours, but the other days are normal. 
+
+```{r, echo=FALSE, warning=FALSE}
+limbo_time_clinics <- vet_clinic_hours_final %>% 
+  filter(clinic_type == 'Limbo Time Clinic') 
+
+
+
+
+limbo_time_clinics_hours_operation <- limbo_time_clinics %>%
+  mutate(Monday_Open_Close = paste(Monday_Open_st, Monday_Close_st, sep = "-"),
+         Tuesday_Open_Close = paste(Tuesday_Open_st, Tuesday_Close_st, sep = "-"),
+         Wednesday_Open_Close = paste(Wednesday_Open_st, Wednesday_Close_st, sep = "-"),
+         Thursday_Open_Close = paste(Thursday_Open_st, Thursday_Close_st, sep = "-"),
+         Friday_Open_Close = paste(Friday_Open_st, Friday_Close_st, sep = "-")) 
+
+
+monday_limbo_hours_operation <- limbo_time_clinics_hours_operation %>%
+  select(`Monday Open`, `Monday Close`, Monday_Open_Close) %>% 
+  filter(`Monday Close` > 1700 & `Monday Close` < 1900)
+
+tuesday_limbo_hours_operation <- limbo_time_clinics_hours_operation %>%
+  select(`Tuesday Open`, `Tuesday Close`, Tuesday_Open_Close) %>% 
+  filter(`Tuesday Close` > 1700 & `Tuesday Close` < 1900)
+
+wednesday_limbo_hours_operation <- limbo_time_clinics_hours_operation %>%
+  select(`Wednesday Open`, `Wednesday Close`, Wednesday_Open_Close) %>% 
+  filter(`Wednesday Close` > 1700 & `Wednesday Close` < 1900)
+
+thursday_limbo_hours_operation <- limbo_time_clinics_hours_operation %>%
+  select(`Thursday Open`, `Thursday Close`, Thursday_Open_Close) %>% 
+  filter(`Thursday Close` > 1700 & `Thursday Close` < 1900)
+
+friday_limbo_hours_operation <- limbo_time_clinics_hours_operation %>%
+  select(`Friday Open`, `Friday Close`, Friday_Open_Close) %>% 
+  filter(`Friday Close` > 1700 & `Friday Close` < 1900)
+
+limbo_count_join_table <- stack(limbo_time_clinics_hours_operation[149:153]) %>% 
+  group_by(values) %>% 
+  summarise(`Days Count` = n()) %>% 
+  mutate(values = case_when(values == "NA-NA" ~ "Closed",
+                            TRUE ~ values)) %>% 
+  filter(values != "Closed")
+
+total_days_limbo_clinics_op = sum(limbo_count_join_table$`Days Count`)
+
+limbo_time_clinics_hours_list <- stack(limbo_time_clinics_hours_operation[149:153]) %>% 
+  distinct(values) %>% 
+  left_join(monday_limbo_hours_operation, by = c("values" = "Monday_Open_Close")) %>%
+  rename(Open = `Monday Open`, Close = `Monday Close`) %>% 
+  left_join(tuesday_limbo_hours_operation, by = c("values" = "Tuesday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Tuesday Open`),
+         Close = coalesce(Close, `Tuesday Close`)) %>% 
+  select(-`Tuesday Open`, -`Tuesday Close`) %>% 
+  left_join(wednesday_limbo_hours_operation, by = c("values" = "Wednesday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Wednesday Open`),
+         Close = coalesce(Close, `Wednesday Close`)) %>% 
+  select(-`Wednesday Open`, -`Wednesday Close`) %>% 
+  left_join(thursday_limbo_hours_operation, by = c("values" = "Thursday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Thursday Open`),
+         Close = coalesce(Close, `Thursday Close`)) %>% 
+  select(-`Thursday Open`, -`Thursday Close`) %>% 
+  left_join(friday_limbo_hours_operation, by = c("values" = "Friday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Friday Open`),
+         Close = coalesce(Close, `Friday Close`)) %>% 
+  select(-`Friday Open`, -`Friday Close`) %>% 
+  drop_na() %>% 
+  left_join(limbo_count_join_table, by = "values") %>% 
+  arrange(desc(`Days Count`)) %>%
+  mutate(Total_Count = sum(`Days Count`),
+         Percent = percent(`Days Count`/Total_Count, accuracy = 0.01)) %>% 
+  slice_head(n = 10) %>% 
+  select(values, `Days Count`, Percent)
+
+knitr::kable(limbo_time_clinics_hours_list, caption = "Top Ten Limbo Clinic Hours Operation", align = c("l", "c", "r"))
+
+
+
+```
+
+
+### Outside Normal Hour Clinics
+
+Outside Normal Hour Clinics may also offer normal hours and limbo hours.
+
+```{r, echo=FALSE, warning=FALSE}
+outside_normal_clinics <- vet_clinic_hours_final %>% 
+  filter(clinic_type == 'Outside Normal Hours Clinic') 
+
+
+outside_normal_clinics_hours_operation <- outside_normal_clinics %>%
+  mutate(Monday_Open_Close = paste(Monday_Open_st, Monday_Close_st, sep = "-"),
+         Tuesday_Open_Close = paste(Tuesday_Open_st, Tuesday_Close_st, sep = "-"),
+         Wednesday_Open_Close = paste(Wednesday_Open_st, Wednesday_Close_st, sep = "-"),
+         Thursday_Open_Close = paste(Thursday_Open_st, Thursday_Close_st, sep = "-"),
+         Friday_Open_Close = paste(Friday_Open_st, Friday_Close_st, sep = "-"),
+         Saturday_Open_Close = paste(Saturday_Open_st, Saturday_Close_st, sep = "-"),
+         Sunday_Open_Close = paste(Sunday_Open_st, Sunday_Close_st, sep = "-")) 
+
+
+monday_ON_hours_operation <- outside_normal_clinics_hours_operation %>%
+  filter(monday_after_hours == TRUE | monday_early_hours == TRUE) %>% 
+  select(`Monday Open`, `Monday Close`, Monday_Open_Close)
+  
+
+tuesday_ON_hours_operation <- outside_normal_clinics_hours_operation %>%
+  filter(tuesday_after_hours == TRUE | tuesday_early_hours == TRUE) %>% 
+  select(`Tuesday Open`, `Tuesday Close`, Tuesday_Open_Close)
+
+wednesday_ON_hours_operation <- outside_normal_clinics_hours_operation %>%
+  filter(wednesday_after_hours == TRUE | wednesday_early_hours == TRUE) %>% 
+  select(`Wednesday Open`, `Wednesday Close`, Wednesday_Open_Close)
+
+thursday_ON_hours_operation <- outside_normal_clinics_hours_operation %>%
+  filter(thursday_after_hours == TRUE | thursday_early_hours == TRUE) %>% 
+  select(`Thursday Open`, `Thursday Close`, Thursday_Open_Close) 
+
+friday_ON_hours_operation <- outside_normal_clinics_hours_operation %>%
+  filter(friday_after_hours == TRUE | friday_early_hours == TRUE) %>% 
+  select(`Friday Open`, `Friday Close`, Friday_Open_Close) 
+
+saturday_ON_hours_operation <- outside_normal_clinics_hours_operation %>%
+  filter(saturday_normal_hours == TRUE) %>% 
+  select(`Saturday Open`, `Saturday Close`, Saturday_Open_Close) 
+
+sunday_ON_hours_operation <- outside_normal_clinics_hours_operation %>%
+  filter(sunday_normal_hours == TRUE) %>% 
+  select(`Sunday Open`, `Sunday Close`, Sunday_Open_Close) 
+
+
+ON_count_join_table <- stack(outside_normal_clinics_hours_operation[149:155]) %>% 
+  group_by(values) %>% 
+  summarise(`Days Count` = n()) %>% 
+  mutate(values = case_when(values == "NA-NA" ~ "Closed",
+                            TRUE ~ values)) %>% 
+  filter(values != "Closed")
+
+ON_saturday_count_join_table <- saturday_ON_hours_operation %>% 
+  group_by(Saturday_Open_Close) %>% 
+  summarise(`Days Count` = n()) %>% 
+  mutate(Saturday_Open_Close = case_when(Saturday_Open_Close == "NA-NA" ~ "Closed",
+                                         TRUE ~ Saturday_Open_Close)) %>% 
+  filter(Saturday_Open_Close != "Closed")
+
+ON_sunday_count_join_table <- sunday_ON_hours_operation %>% 
+  group_by(Sunday_Open_Close) %>% 
+  summarise(`Days Count` = n()) %>% 
+  mutate(Sunday_Open_Close = case_when(Sunday_Open_Close == "NA-NA" ~ "Closed",
+                                         TRUE ~ Sunday_Open_Close)) %>% 
+  filter(Sunday_Open_Close != "Closed")
+
+ON_clinics_weekday_hours_list <- stack(outside_normal_clinics_hours_operation[149:155]) %>% 
+  distinct(values) %>% 
+  left_join(monday_ON_hours_operation, by = c("values" = "Monday_Open_Close")) %>%
+  rename(Open = `Monday Open`, Close = `Monday Close`) %>% 
+  left_join(tuesday_ON_hours_operation, by = c("values" = "Tuesday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Tuesday Open`),
+         Close = coalesce(Close, `Tuesday Close`)) %>% 
+  select(-`Tuesday Open`, -`Tuesday Close`) %>% 
+  left_join(wednesday_ON_hours_operation, by = c("values" = "Wednesday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Wednesday Open`),
+         Close = coalesce(Close, `Wednesday Close`)) %>% 
+  select(-`Wednesday Open`, -`Wednesday Close`) %>% 
+  left_join(thursday_ON_hours_operation, by = c("values" = "Thursday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Thursday Open`),
+         Close = coalesce(Close, `Thursday Close`)) %>% 
+  select(-`Thursday Open`, -`Thursday Close`) %>% 
+  left_join(friday_ON_hours_operation, by = c("values" = "Friday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Friday Open`),
+         Close = coalesce(Close, `Friday Close`)) %>% 
+  select(-`Friday Open`, -`Friday Close`) %>%
+  drop_na() %>% 
+  left_join(ON_count_join_table, by = "values") %>% 
+  arrange(desc(`Days Count`)) %>%
+  mutate(Total_Count = sum(`Days Count`),
+         Percent = percent(`Days Count`/Total_Count, accuracy = 0.01)) %>%
+  slice_head(n = 10) %>% 
+  select(values, `Days Count`, Percent)
+
+ON_clinics_saturday_hours_list <- saturday_ON_hours_operation %>% 
+  left_join(ON_saturday_count_join_table, by = "Saturday_Open_Close") %>% 
+  distinct(Saturday_Open_Close, .keep_all = TRUE) %>% 
+  mutate(Open = `Saturday Open`,
+         Close = `Saturday Close`) %>% 
+  select(-`Saturday Open`, -`Saturday Close`) %>% 
+  arrange(desc(`Days Count`)) %>%
+  mutate(Total_Count = sum(`Days Count`),
+         Percent = percent(`Days Count`/Total_Count, accuracy = 0.01)) %>%
+  slice_head(n = 10) %>% 
+  select(Saturday_Open_Close, `Days Count`, Percent)
+
+ON_clinics_sunday_hours_list <- sunday_ON_hours_operation %>% 
+  left_join(ON_sunday_count_join_table, by = "Sunday_Open_Close") %>% 
+  distinct(Sunday_Open_Close, .keep_all = TRUE) %>% 
+  mutate(Open = `Sunday Open`,
+         Close = `Sunday Close`) %>% 
+  select(-`Sunday Open`, -`Sunday Close`) %>% 
+  arrange(desc(`Days Count`)) %>%
+  mutate(Total_Count = sum(`Days Count`),
+         Percent = percent(`Days Count`/Total_Count, accuracy = 0.01)) %>%
+  slice_head(n = 10) %>% 
+  select(Sunday_Open_Close, `Days Count`, Percent)
+  
+  
+
+
+knitr::kable(ON_clinics_weekday_hours_list, caption = "Top Ten Outside Normal Hour Clinics Weekday Hours of Operation", align = c("l", "c", "r"))
+knitr::kable(ON_clinics_saturday_hours_list, caption = "Top Ten Outside Normal Hour Clinics Saturday Hours of Operation", align = c("l", "c", "r"))
+knitr::kable(ON_clinics_sunday_hours_list, caption = "Top Ten Outside Normal Hour Clinics Sunday Hours of Operation", align = c("l", "c", "r"))
+
+```
+
+### Emergency Clinics
+
+It is possible for emergency clinics to also offer normal, limbo, and outside normal hours throughout the week.
+
+```{r, echo=FALSE, warning=FALSE}
+emergency_clinics <- vet_clinic_hours_final %>% 
+  filter(clinic_type == 'Emergency Clinic') 
+
+
+emergency_clinics_hours_operation <- emergency_clinics %>%
+  mutate(Monday_Open_Close = paste(Monday_Open_st, Monday_Close_st, sep = "-"),
+         Tuesday_Open_Close = paste(Tuesday_Open_st, Tuesday_Close_st, sep = "-"),
+         Wednesday_Open_Close = paste(Wednesday_Open_st, Wednesday_Close_st, sep = "-"),
+         Thursday_Open_Close = paste(Thursday_Open_st, Thursday_Close_st, sep = "-"),
+         Friday_Open_Close = paste(Friday_Open_st, Friday_Close_st, sep = "-"),
+         Saturday_Open_Close = paste(Saturday_Open_st, Saturday_Close_st, sep = "-"),
+         Sunday_Open_Close = paste(Sunday_Open_st, Sunday_Close_st, sep = "-")) 
+
+
+monday_emergency_hours_operation <- emergency_clinics_hours_operation %>%
+  filter(monday_emergency_hours == TRUE) %>% 
+  select(`Monday Open`, `Monday Close`, Monday_Open_Close)
+  
+
+tuesday_emergency_hours_operation <- emergency_clinics_hours_operation %>%
+  filter(tuesday_emergency_hours == TRUE) %>% 
+  select(`Tuesday Open`, `Tuesday Close`, Tuesday_Open_Close)
+
+wednesday_emergency_hours_operation <- emergency_clinics_hours_operation %>%
+  filter(wednesday_emergency_hours == TRUE) %>% 
+  select(`Wednesday Open`, `Wednesday Close`, Wednesday_Open_Close)
+
+thursday_emergency_hours_operation <- emergency_clinics_hours_operation %>%
+  filter(thursday_emergency_hours == TRUE) %>% 
+  select(`Thursday Open`, `Thursday Close`, Thursday_Open_Close) 
+
+friday_emergency_hours_operation <- emergency_clinics_hours_operation %>%
+  filter(friday_emergency_hours == TRUE) %>% 
+  select(`Friday Open`, `Friday Close`, Friday_Open_Close) 
+
+saturday_emergency_hours_operation <- emergency_clinics_hours_operation %>%
+  filter(saturday_emergency_hours == TRUE | saturday_early_hours == TRUE | saturday_after_hours) %>% 
+  select(`Saturday Open`, `Saturday Close`, Saturday_Open_Close) 
+
+sunday_emergency_hours_operation <- emergency_clinics_hours_operation %>%
+  filter(sunday_emergency_hours == TRUE | sunday_early_hours == TRUE | sunday_after_hours == TRUE) %>% 
+  select(`Sunday Open`, `Sunday Close`, Sunday_Open_Close) 
+
+
+emergency_count_join_table <- stack(emergency_clinics_hours_operation[149:155]) %>% 
+  group_by(values) %>% 
+  summarise(`Days Count` = n()) %>% 
+  mutate(values = case_when(values == "NA-NA" ~ "Closed",
+                            TRUE ~ values)) %>% 
+  filter(values != "Closed")
+
+emergency_saturday_count_join_table <- saturday_emergency_hours_operation %>% 
+  group_by(Saturday_Open_Close) %>% 
+  summarise(`Days Count` = n()) %>% 
+  mutate(Saturday_Open_Close = case_when(Saturday_Open_Close == "NA-NA" ~ "Closed",
+                                         TRUE ~ Saturday_Open_Close)) %>% 
+  filter(Saturday_Open_Close != "Closed")
+
+emergency_sunday_count_join_table <- sunday_emergency_hours_operation %>% 
+  group_by(Sunday_Open_Close) %>% 
+  summarise(`Days Count` = n()) %>% 
+  mutate(Sunday_Open_Close = case_when(Sunday_Open_Close == "NA-NA" ~ "Closed",
+                                         TRUE ~ Sunday_Open_Close)) %>% 
+  filter(Sunday_Open_Close != "Closed")
+
+emergency_clinics_weekday_hours_list <- stack(emergency_clinics_hours_operation[149:155]) %>% 
+  distinct(values) %>% 
+  left_join(monday_emergency_hours_operation, by = c("values" = "Monday_Open_Close")) %>%
+  rename(Open = `Monday Open`, Close = `Monday Close`) %>% 
+  left_join(tuesday_emergency_hours_operation, by = c("values" = "Tuesday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Tuesday Open`),
+         Close = coalesce(Close, `Tuesday Close`)) %>% 
+  select(-`Tuesday Open`, -`Tuesday Close`) %>% 
+  left_join(wednesday_emergency_hours_operation, by = c("values" = "Wednesday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Wednesday Open`),
+         Close = coalesce(Close, `Wednesday Close`)) %>% 
+  select(-`Wednesday Open`, -`Wednesday Close`) %>% 
+  left_join(thursday_emergency_hours_operation, by = c("values" = "Thursday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Thursday Open`),
+         Close = coalesce(Close, `Thursday Close`)) %>% 
+  select(-`Thursday Open`, -`Thursday Close`) %>% 
+  left_join(friday_emergency_hours_operation, by = c("values" = "Friday_Open_Close")) %>% 
+  distinct(values, .keep_all = TRUE) %>% 
+  mutate(Open = coalesce(Open, `Friday Open`),
+         Close = coalesce(Close, `Friday Close`)) %>% 
+  select(-`Friday Open`, -`Friday Close`) %>%
+  drop_na() %>% 
+  left_join(emergency_count_join_table, by = "values") %>% 
+  arrange(desc(`Days Count`)) %>%
+  mutate(Total_Count = sum(`Days Count`),
+         Percent = percent(`Days Count`/Total_Count, accuracy = 0.01)) %>%
+  slice_head(n = 10) %>% 
+  select(values, `Days Count`, Percent)
+
+emergency_clinics_saturday_hours_list <- saturday_emergency_hours_operation %>% 
+  left_join(emergency_saturday_count_join_table, by = "Saturday_Open_Close") %>% 
+  distinct(Saturday_Open_Close, .keep_all = TRUE) %>% 
+  mutate(Open = `Saturday Open`,
+         Close = `Saturday Close`) %>% 
+  select(-`Saturday Open`, -`Saturday Close`) %>% 
+  arrange(desc(`Days Count`)) %>%
+  mutate(Total_Count = sum(`Days Count`),
+         Percent = percent(`Days Count`/Total_Count, accuracy = 0.01)) %>%
+  slice_head(n = 10) %>% 
+  select(Saturday_Open_Close, `Days Count`, Percent)
+
+emergency_clinics_sunday_hours_list <- sunday_emergency_hours_operation %>% 
+  left_join(emergency_sunday_count_join_table, by = "Sunday_Open_Close") %>% 
+  distinct(Sunday_Open_Close, .keep_all = TRUE) %>% 
+  mutate(Open = `Sunday Open`,
+         Close = `Sunday Close`) %>% 
+  select(-`Sunday Open`, -`Sunday Close`) %>% 
+  arrange(desc(`Days Count`)) %>%
+  mutate(Total_Count = sum(`Days Count`),
+         Percent = percent(`Days Count`/Total_Count, accuracy = 0.01)) %>%
+  slice_head(n = 10) %>% 
+  select(Sunday_Open_Close, `Days Count`, Percent)
+  
+  
+
+
+knitr::kable(emergency_clinics_weekday_hours_list, caption = "Top Ten emergency Clinics Weekday Hours of Operation", align = c("l", "c", "r"))
+knitr::kable(emergency_clinics_saturday_hours_list, caption = "Top Ten emergency Clinics Saturday Hours of Operation", align = c("l", "c", "r"))
+knitr::kable(emergency_clinics_sunday_hours_list, caption = "Top emergency Clinics Sunday Hours of Operation", align = c("l", "c", "r"))
+
+
+```
+
+
+### Chi Square Test + Cramer V
+
+For this Chi Square Test, I tested the SVI Index with the type of clinics. Each RPL Theme was dividing into 5 groups, ranging from "Very Vulnerable" to "Very Secure". Each P-value was significant, but the size of the groups could be playing a factor into that. Each of the cramer v values, which measures the association between two variables. 0 is no association and 1 is perfect association. Our values show there is a very weak association. 
+
+```{r, echo=FALSE, warning=FALSE}
+#Combing SVI index with vet_clinic_hours_final
+SVI_index_table <- vet_clinic_hours_final %>% 
+  left_join(SVI, by = c("full_census_tract" = "LOCATION")) %>%
+  filter(is.na(ST) == FALSE) %>% 
+  filter(RPL_THEME1 != -999.0000) %>% 
+  filter(RPL_THEME2 != -999.0000) %>% 
+  filter(RPL_THEME3 != -999.0000) %>% 
+  filter(RPL_THEME4 != -999.0000) %>% 
+  filter(RPL_THEMES != -999.0000) %>% 
+  mutate(socio_economic_group = cut(RPL_THEME1, breaks = 5, labels = c("Very Vulnerable", "Vulnerable", "Neither", "Secure", "Very Secure")),
+         household_group = cut(RPL_THEME2, breaks = 5, labels = c("Very Vulnerable", "Vulnerable", "Neither", "Secure", "Very Secure")),
+         racial_ethnic_minority_group = cut(RPL_THEME3, breaks = 5, labels = c("Very Vulnerable", "Vulnerable", "Neither", "Secure", "Very Secure")),
+         house_type_transportation_group = cut(RPL_THEME4, breaks = 5, labels = c("Very Vulnerable", "Vulnerable", "Neither", "Secure", "Very Secure")),
+         combined_group = cut(RPL_THEMES, breaks = 5, labels = c("Very Vulnerable", "Vulnerable", "Neither", "Secure", "Very Secure")))
+
+
+##creating functions
+
+
+create_rpl_test_result_table <- function(){
+  
+  df <- data.frame(RPL_Theme = NULL, P_value = NULL, Cramer_V = NULL)
+
+
+  rpl_theme_names <- c("Socioeconomic Status",
+                     "Household Characteristics",
+                     "Racial & Ethnic Minority Status",
+                     "Housing Type & Transportation",
+                     "All Themes")
+  col_names <- c("socio_economic_group",
+               "household_group",
+               "racial_ethnic_minority_group",
+               "house_type_transportation_group",
+               "combined_group")
+  
+  for (i in 1:5){
+    
+    tab <- table(SVI_index_table[[col_names[i]]], SVI_index_table$clinic_type)
+    
+    chi_results <- chisq.test(tab)
+    cramer_v_results <- assocstats(tab)
+    
+    df <- rbind(df, data.frame(RPL_Theme = rpl_theme_names[i], P_value = chi_results$p.value, Cramer_V = cramer_v_results$cramer))
+  }
+
+return(df)
+  
+} 
+
+results_table <- create_rpl_test_result_table()
+
+knitr::kable(results_table)
+
+```
+
+
+
+
+```{r, include=FALSE}
+# us_zips_county_join_table <- us_zips %>% 
+#   select(zip, county_name)
+# 
+# acs5 <- load_variables(2021, "acs5", cache = TRUE) %>% 
+#   filter(str_detect(concept, "MEDIAN HOUSEHOLD INCOME") == TRUE)
+# 
+# decennial <- load_variables(2020, "pl", cache = TRUE)
+# 
+# 
+# total_population_20_county <- get_decennial(
+#   geography = "county",
+#   variables = "P1_001N",
+#   year = 2020,
+#   geometry = TRUE
+# )
+# 
+# 
+# us_counties_med_income <- get_acs(year = 2021, geography = "county", variables = c("B19013_001")) %>% 
+#   filter(str_detect(NAME, "Puerto Rico") == FALSE)
+
+```
+
+
+
+```{r, echo=FALSE, warning=FALSE}
+
+# all_clinics_w_county <- all_clinics_dat %>% 
+#   left_join(us_zips_county_join_table, by = c("Zip" = "zip")) %>% 
+#   mutate(county_state = case_when(county_name %in% c("Virginia Beach", "Alexandria", "Chesapeake", "Falls Church", "Fredericksburg", "Hampton", "Manassas", "Newport News", "Winchester", "Suffolk", "Portsmouth", "Norfolk", "Lynchburg", "Bristol", "Poquoson") & `State Description` == "VIRGINIA" ~ paste(county_name, "city", sep = " "),
+#                                   `State Description` == "LOUISIANA" ~ paste(county_name, "Parish", sep = " "),
+#                                   `State Description` == "ALASKA" & county_name %in% c("Anchorage") ~ paste(county_name, "Municipality", sep = " "),
+#                                   `State Description` == "ALASKA" & county_name %in% c("Yukon-Koyukuk", "Bethel") ~ paste(county_name, "Census Area", sep = " "),
+#                                   `State Description` == "ALASKA" & county_name %in% c("Sitka", "Juneau") ~ paste(county_name, "City and Borough", sep = " "),
+#                                   `State Description` == "ALASKA" & county_name %in% c("Matanuska-Susitna", "Kodiak Island", "Ketchikan Gateway", "Kenai Peninsula", "Fairbanks North Star") ~ paste(county_name, "Borough", sep = " "),
+#                                   `State Description` == "NEVADA" & county_name == "Carson City" ~ "Carson City",
+#                                   TRUE ~ paste(county_name, "County", sep = " "))) %>% 
+#   mutate(county_state = case_when(`State Description` == "DISTRICT OF COLUMBIA" & county_name == "District of Columbia" ~ "District of Columbia, District of Columbia",
+# TRUE ~ paste(county_state, str_to_title(`State Description`), sep = ", "))) 
+#   
+# 
+# state_county_num_clinics <- all_clinics_w_county %>%
+#   group_by(county_state) %>% 
+#   summarise(total_employees = sum(`Number of Employees`),
+#             num_clinics = n()) %>% 
+#   left_join(us_counties_med_income, by = c("county_state" = "NAME")) %>% 
+#   filter(is.na(GEOID) == FALSE) %>% 
+#   left_join(select(total_population_20_county, NAME, value), by = c("county_state" = "NAME")) %>% 
+#   mutate(income_group = cut(estimate, breaks = c(0, 29960, 59920, 89880, max(estimate)), labels = c("Poverty or Below", "2x Poverty", "3x Poverty", "4x Poverty or more")),
+#          employees_per_clinic = total_employees/num_clinics)
+# 
+# Q1 <- quantile(state_county_num_clinics$employees_per_clinic, .25)
+# Q3 <- quantile(state_county_num_clinics$employees_per_clinic, .75)
+# IQR <- IQR(state_county_num_clinics$employees_per_clinic)
+# 
+# low_bound_outliers <- round((Q1 - 1.5*IQR))
+# up_bond_outliers <- round((Q3 + 1.5*IQR))
+# 
+# 
+# state_county_num_clinics$norm_employees_per_clinic <- state_county_num_clinics$employees_per_clinic
+# 
+# state_county_num_clinics$norm_employees_per_clinic[state_county_num_clinics$norm_employees_per_clinic < low_bound_outliers] <- low_bound_outliers
+# state_county_num_clinics$norm_employees_per_clinic[state_county_num_clinics$norm_employees_per_clinic > up_bond_outliers] <- up_bond_outliers
+# 
+# ggplot(data = state_county_num_clinics, aes(x = income_group, y = employees_per_clinic))+
+#   geom_boxplot()
+# 
+# ggplot(data = state_county_num_clinics, aes(x = income_group, y = norm_employees_per_clinic)) +
+#   geom_boxplot()
+# 
+# ggplot(data = state_county_num_clinics, aes(x = estimate, y = total_employees)) +
+#   geom_point()
+
+```
+
+
+#### Model To Explain Clinic Classification
+
+
+First, I wanted to see if whether median household income by census tract was associated with the type of clinic. So, created some box plots. From the first box plot, limbo and normal clinics have a slightly lower median income, but all types of clinics are roughly the same. Normal, Limbo, and outside normal have more high income outliers than 24 hour and emergency clinics.
+
+When replacing the outliers, the clinic types still have roughly similar distribution of median household income.
+
+
+```{r, echo = FALSE}
+vet_clinic_original_census_tracts <- all_clinics_dat %>% 
+  select(full_address, `Census Tract`, `Census Block`) %>% 
+  distinct(full_address, .keep_all = TRUE)
+
+comparing_tracts_df <- geo_addresses_w_CT %>% 
+  left_join(vet_clinic_original_census_tracts, by = "full_address") %>% 
+  select(1:4, `Census Tract`, `Census Block`)
+
+
+
+med_income_open_hours <- vet_clinic_hours_final %>% 
+  left_join(med_income_by_census_tract, by = c("full_census_tract" = "NAME")) %>% 
+  filter(is.na(moe) == FALSE) %>% 
+  mutate(income_group = cut(estimate, breaks = c(0, 29960, 59920, 89880, max(estimate)), labels = c("Poverty or Below", "2x Poverty", "3x Poverty", "4x Poverty or more")),
+         income_group_2 = cut(estimate, breaks = c(0, 59920, 89880, max(estimate)), labels = c("2x Poverty or below", "Between 2x/3x Poverty", "3x Poverty or more")),
+         income_group_3 = cut_number(estimate, 3, labels = c("Low Income", "Medium Income", "High Income")),
+         income_group_4 = cut(estimate, breaks = c(0, 10000, 20000, 30000, 40000, 50000, 60000, 70000, 80000, 90000, 100000, max(estimate))))
+
+
+ggplot(data = med_income_open_hours, aes(x = clinic_type, y = estimate))+
+  geom_boxplot()
+
+
+Q3 <- quantile(med_income_open_hours$estimate, .75)
+IQR <- IQR(med_income_open_hours$estimate)
+up_bond_outliers <- round((Q3 + 1.5*IQR))
+
+med_income_open_hours$norm_estimate <- med_income_open_hours$estimate
+
+med_income_open_hours$norm_estimate[med_income_open_hours$norm_estimate > up_bond_outliers] <- up_bond_outliers
+
+ggplot(data = med_income_open_hours, aes(x = clinic_type, y = norm_estimate))+
+  geom_boxplot()
+```
+
+
+```{r, echo = FALSE, warning = FALSE}
+
+# prop.table(table(med_income_by_census_tract$income_group))
+# 
+# prop.table(table(med_income_open_hours$income_group))
+# table(med_income_open_hours$income_group)
+# 
+# 
+# prop.table(table(med_income_open_hours$clinic_type))
+# table(med_income_open_hours$clinic_type)
+# 
+# 
+# barplot(prop.table(table(med_income_open_hours$clinic_type, med_income_open_hours$income_group), margin = 2), legend = TRUE)
+
+```
+
+
+```{r, echo = FALSE, warning = FALSE}
+# chi_results <- chisq.test(table(med_income_open_hours$income_group, med_income_open_hours$clinic_type))
+# 
+# chi_results$observed
+# 
+# chi_results$expected
+# 
+# chi_results$residuals
+
+#prop_df <- data.frame(prop.table(table(med_income_open_hours$income_group_2, med_income_open_hours$clinic_type), margin = 1)) %>% 
+#  mutate(adjusted_frequency = case_when(Var2 == "24 Hour Clinic" ~ 0.04443877 - Freq,
+#                                        Var2 == "Emergency Clinic" ~ 0.07082961 - Freq,
+#                                        Var2 == "Limbo Time Clinic" ~ 0.11539608 - Freq,
+#                                        Var2 == "Normal Clinic" ~ 0.13421019 - Freq,
+#                                        Var2 == "Outside Normal Hours Clinic" ~ 0.63512536 - Freq))
+
+```
+
+
+```{r, echo = FALSE, warning = FALSE}
+#table(med_income_open_hours$income_group_2, med_income_open_hours$clinic_type)
+
+#prop.table(table(med_income_open_hours$income_group_2, med_income_open_hours$clinic_type), margin = 1)
+#prop.table(table(med_income_open_hours$clinic_type))
+#prop.table(table(med_income_open_hours$income_group_3, med_income_open_hours$clinic_type), margin = 2)
+
+```
+
+
+* Low Income Range = 11150 - 60257
+* Medium Income Range = 60260 - 86875
+* High Income Range = 86855 - 248929
+
+```{r, fig.width=8, fig.height=6, echo = FALSE, warning = FALSE}
+
+min_max_estimates_of_groups <- med_income_open_hours %>% 
+  group_by(income_group_3) %>% 
+  summarise(min_estimate = min(estimate),
+            max_estimate = max(estimate))
+
+
+prop_df <- data.frame(prop.table(table(med_income_open_hours$income_group_3, med_income_open_hours$clinic_type), margin = 2))
+
+prop_df$Var2 <- factor(prop_df$Var2,
+                         levels = c("24 Hour Clinic", "Emergency Clinic", "Outside Normal Hours Clinic", "Limbo Time Clinic", "Normal Clinic"))
+
+ggplot(data = prop_df, aes(x = Var2, y = Freq, fill = Var1)) +
+  geom_col() +
+  labs(y = "Percent", x = "Clinic Type", color = "Income", fill = "Income") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), breaks = scales::pretty_breaks(n = 5)) +
+  geom_text(aes(label = percent(Freq, accuracy = 0.01)), size = 3, hjust = 0.5, vjust = 3, position = "stack") +
+  ggtitle("Clinic Type Proportions by Income at Census Tract Level") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="top")
+
+
+blib <- med_income_open_hours %>% 
+  filter(`Monday Open` > `Monday Close` | `Tuesday Open` > `Tuesday Close` | `Wednesday Open` > `Wednesday Close` | `Thursday Open` > `Thursday Close` | `Friday Open` > `Friday Close` | `Saturday Open` > `Saturday Close` | `Sunday Open` > `Sunday Close`) %>% 
+  group_by(income_group_3) %>% 
+  summarise(Count = n())
+
+```
+
+
+### Assumptions of Chi Square
+
+* The data in each cell should be a count: CHECK
+* The levels of the categories should be mutually exclusive. ie, no levels like, low income, low and medium income, low and medium and high income: CHECK
+* Each subject may contribute data to one and only one cell: CHECK
+* The study groups must be independent. ie, no paired samples like, pre and post test results: CHECK
+* There are 2 variables, and both are measured as categories: CHECK
+* The value of the cell expecteds should be 5 or more in at least 80% of the cells: CHECK
+
+
+```{r, echo = FALSE, warning = FALSE}
+table(med_income_open_hours$income_group_3, med_income_open_hours$clinic_type)
+
+results <- chisq.test(table(med_income_open_hours$income_group_3, med_income_open_hours$clinic_type))
+results$expected
+results$stdres
+
+print("pvalue") 
+results$p.value
+
+library(rcompanion)
+
+cramerV(table(med_income_open_hours$income_group_3, med_income_open_hours$clinic_type))
+
+
+```
+The first table is our observed values, second table is our expected, and the third is our standardized residuals. We can see from the expected values, that chisquare test expects each clinic to have about the same number of clinics in each group. I believe this is because we have an equal number of clinics in each of the income groups.
+
+There is a very weak association between Income and clinic type.
+
+
+### Cramer's V
+
+```{r}
+
+```
+
+### Scatter Plots
+
+```{r warning=FALSE, echo = FALSE}
+med_income_open_hours$total_outside_normal_hours <- med_income_open_hours$total_after_hours + med_income_open_hours$total_emergency_hours
+
+
+
+ggplot(data = med_income_open_hours, aes(x = estimate, y = total_weekly_hours, fill = clinic_type, color = clinic_type)) +
+  geom_point() 
+
+ggplot(data = med_income_open_hours, aes(x = estimate, y = total_weekly_hours)) +
+  geom_point() +
+  facet_wrap(~ clinic_type) 
+
+```
+
+
+
+```{r, echo = FALSE, warning = FALSE}
+
+# med_income_outside_normal_hours <- med_income_open_hours %>% 
+#   filter(total_outside_normal_hours > 0)
+# 
+# ggplot(data = med_income_open_hours, aes(x = income_group_3, y = total_outside_normal_hours)) +
+#   geom_boxplot()
+# 
+# 
+# Q3 <- quantile(med_income_open_hours$total_outside_normal_hours, .75)
+# IQR <- IQR(med_income_open_hours$total_outside_normal_hours)
+# up_bond_outliers <- round((Q3 + 1.5*IQR))
+# 
+# med_income_open_hours$norm_total_outside_normal_hours <- med_income_open_hours$total_outside_normal_hours
+# 
+# med_income_open_hours$norm_total_outside_normal_hours[med_income_open_hours$norm_total_outside_normal_hours > up_bond_outliers] <- up_bond_outliers
+# 
+# ggplot(data = med_income_open_hours, aes(x = income_group_3, y = norm_total_outside_normal_hours)) +
+#   geom_boxplot()
+# 
+# ggplot(data = med_income_open_hours, aes(x = clinic_type, y = total_weekly_hours)) +
+#   geom_boxplot()
+
+#ggplot(data = med_income_open_hours, aes(x = total_weekly_hours)) +
+ # geom_histogram(data = med_income_open_hours) +
+
+  
+  
+#prop.table(table(med_income_open_hours$`State Description`, med_income_open_hours$clinic_type), margin = 1)
+#state_clinci_type_df <- data.frame(table(med_income_open_hours$`State Description`, med_income_open_hours$clinic_type))
+
+#alaska_clinics <- all_clinics_dat %>% 
+#  filter(State == "WV") %>% 
+#  filter(is.na(`Monday Close`) == TRUE)
+
+#alaska_clinics_with_hours <- vet_clinic_open_hours %>% 
+#  filter(State == "WV")
+
+
+#table(med_income_open_hours$`State Description`, med_income_open_hours$income_group_3)
+
+
+
+```
+
+
+
+
+```{r, echo = FALSE, warning = FALSE}
+# count_all_census_tracts <- med_income_by_census_tract %>% 
+#   separate(col = NAME, into = c("tract", "county", "state"), sep = ", ", remove = FALSE) %>% 
+#   #filter(is.na(estimate) == FALSE) %>% 
+#   group_by(state) %>% 
+#   summarise(Count = n())
+# 
+# count_census_tracts_med_income <- med_income_by_census_tract %>% 
+#   separate(col = NAME, into = c("tract", "county", "state"), sep = ", ", remove = FALSE) %>% 
+#   filter(is.na(estimate) == FALSE) %>% 
+#   group_by(state) %>% 
+#   summarise(Count = n()) %>% 
+#   left_join(count_all_census_tracts, by = "state") %>% 
+#   mutate(percent_missing = percent(1 - (Count.x/Count.y), accuracy = 0.01))
+# 
+# 
+# MAD <- med_income_by_census_tract %>% 
+#   separate(col = NAME, into = c("tract", "county", "state"), sep = ", ", remove = FALSE) %>% 
+#   filter(is.na(estimate) == FALSE) %>% 
+#   group_by(state) %>% 
+#   summarise(Median = median(estimate),
+#             MAD = mad(estimate)) %>% 
+#   mutate(MED_min_MAD = Median - MAD,
+#          MED_plus_MAD = Median + MAD)
+# 
+# 
+# outside_normal_hours <- med_income_open_hours %>% 
+#   filter(total_outside_normal_hours > 0) 
+# 
+# 
+# #ggplot(data = med_income_open_hours, aes(x = state_name, y = total_outside_normal_hours)) +
+# #  geom_boxplot() 
+# 
+# 
+# total_hours_outside_normal <- med_income_open_hours %>% 
+#   mutate(census_county_state = paste(county_name, state_name, sep = ", ")) %>% 
+#   group_by(census_county_state) %>% 
+#   summarise(Count = n(),
+#             total_hours = sum(total_weekly_hours),
+#             total_ON_hours = sum(total_outside_normal_hours),
+#             med_hours = median(total_weekly_hours),
+#             med_ON_hours = median(total_outside_normal_hours)) %>% 
+#   left_join(select(us_counties_med_income, NAME, estimate), by = c("census_county_state" = "NAME")) %>% 
+#   rename(Med_Income = "estimate") %>% 
+#   left_join(select(county_pop_by_state, NAME, value), by = c("census_county_state" = "NAME")) %>% 
+#   rename(Pop = "value") %>% 
+#   mutate(standardized_total_hours = total_hours/Pop * 1000,
+#          standardized_total_ON_hours = total_ON_hours/Pop * 1000,
+#          pop_groups = cut_number(Pop, 5, labels = c("Very Low Pop", "Low Pop", "Med Pop", "High Pop", "Very High Pop")))
+# 
+# #ggplot(data = total_hours_outside_normal, aes(x = Med_Income, y = total_hours, group = pop_groups, color = pop_groups)) +
+# #  geom_point() 
+#   
+# Q1 <- quantile(total_hours_outside_normal$total_hours, .25)
+# Q3 <- quantile(total_hours_outside_normal$total_hours, .75)
+# IQR <- IQR(total_hours_outside_normal$total_hours)
+# 
+# low_bound_outliers <- round((Q1 - 1.5*IQR))
+# up_bond_outliers <- round((Q3 + 1.5*IQR))
+# 
+# 
+# total_hours_outside_normal$norm_total_hours <- total_hours_outside_normal$total_hours
+# 
+# total_hours_outside_normal$norm_total_hours[total_hours_outside_normal$norm_total_hours < low_bound_outliers] <- low_bound_outliers
+# total_hours_outside_normal$norm_total_hours[total_hours_outside_normal$norm_total_hours > up_bond_outliers] <- up_bond_outliers
+# 
+# #ggplot(data = total_hours_outside_normal, aes(x = Med_Income, y = norm_total_hours)) +
+# #  geom_point()
+# 
+# Alabama_med_income_open_hours <- med_income_open_hours %>% 
+#   filter(state_name == "North Dakota") %>%
+#   mutate(income_group_4 = cut_number(estimate, 3, labels = c("Low Income", "Median Income", "High Income"))) 
+# 
+# 
+# #ggplot(data = Alabama_med_income_open_hours, aes(x = estimate, y = total_outside_normal_hours)) +
+# #  geom_point()
+# 
+# AL_prop_df <- data.frame(prop.table(table(Alabama_med_income_open_hours$income_group_4, Alabama_med_income_open_hours$clinic_type), margin = 2))
+  
+#table(Alabama_med_income_open_hours$income_group_4, Alabama_med_income_open_hours$clinic_type)
+      
+#ggplot(data = AL_prop_df, aes(x = Var2, y = Freq, fill = Var1)) +
+#  geom_col() +
+#  labs(y = "Percent", x = "Clinic Type", color = "Income", fill = "Income") +
+#  scale_y_continuous(labels = scales::percent_format(accuracy = 1), breaks = scales::pretty_breaks(n = 5)) +
+#  geom_text(aes(label = percent(Freq, accuracy = 0.01)), size = 3, hjust = 0.5, vjust = 3, position = "stack") +
+# ggtitle("Clinic Type Proportions by Income at Census Tract Level") +
+#  theme(plot.title = element_text(hjust = 0.5)) +
+#  theme(legend.position="top")
+```
+
+
+```{r, echo = FALSE, warning = FALSE}
+
+# 
+# prop_df <- data.frame(prop.table(table(med_income_open_hours$income_group_3, med_income_open_hours$clinic_type), margin = 2))
+# 
+# prop_df$Var2 <- factor(prop_df$Var2,
+#                          levels = c("24 Hour Clinic", "Emergency Clinic", "Outside Normal Hours Clinic", "Limbo Time Clinic", "Normal Clinic"))
+
+#ggplot(data = prop_df, aes(x = Var2, y = Freq, fill = Var1)) +
+#  geom_col() +
+#  labs(y = "Percent", x = "Clinic Type", color = "Income", fill = "Income") +
+#  scale_y_continuous(labels = scales::percent_format(accuracy = 1), breaks = scales::pretty_breaks(n = 5)) +
+#  geom_text(aes(label = percent(Freq, accuracy = 0.01)), size = 3, hjust = 0.5, vjust = 3, position = "stack") +
+#  ggtitle("Clinic Type Proportions by Income at Census Tract Level") +
+#  theme(plot.title = element_text(hjust = 0.5)) +
+#  theme(legend.position="top")
+
+
+
+```
+
+
+
+
+
+
+
+
+
+```{r, echo = FALSE, warning = FALSE}
+
+
+
+#normal_clinics_hours_list$index <- 1:nrow(normal_clinics_hours_list)
+
+#normal_clinics <- normal_clinics %>% 
+#  pivot_longer(cols = !index, names_to = "Open_or_Close", values_to = "Time")
+
+#vet_clinic_open_hours_test_3_segment <- vet_clinic_open_hours_test_3 %>% 
+#  pivot_wider(names_from = "Open_or_Close", values_from = Time)
+
+
+#ggplot(data = normal_clinics_hours_list, aes(y = index)) +
+#  geom_point(aes(x = Open), col = "blue") +
+#  geom_point(aes(x = Close), col = "red") +
+#  geom_segment(aes(x = Open, xend = Close, yend = index)) +
+#  geom_vline(xintercept = 715, color = '#116530', linetype = 'dashed') +
+#  geom_vline(xintercept = 1845, color = '#116530', linetype = 'dashed') +
+#  theme_classic() +
+#  theme(axis.text.y = element_blank(),
+#        axis.ticks.y=element_blank(),
+#        axis.title.y = element_blank())
+
+
+```
+
+
+
+```{r, echo=FALSE, warning=FALSE}
+# Libraries
+#library(ggplot2)
+#library(dplyr)
+ 
+# Get the world polygon and extract UK
+#library(maps)
+#USA <- map_data("world") %>% filter(region=="USA")
+
+#Creating US Map
+#ggplot() +
+#  geom_polygon(data = USA, aes(x=long, y = lat, group = group), fill="grey", alpha=0.3) 
+
+
+```
+
+
+
+```{r, echo=FALSE}
+
+#normal_clinics <- normal_clinics %>% 
+#  pivot_longer(cols = !index, names_to = "Open_or_Close", values_to = "Time")
+
+#vet_clinic_open_hours_test_3_segment <- vet_clinic_open_hours_test_3 %>% 
+#  pivot_wider(names_from = "Open_or_Close", values_from = Time)
+
+
+#ggplot(data = normal_clinics_hours_list, aes(y = index)) +
+ # geom_point(aes(x = Open), col = "blue") +
+  #geom_point(aes(x = Close), col = "red") +
+#  geom_segment(aes(x = Open, xend = Close, yend = index)) +
+ # geom_vline(xintercept = 715, color = '#116530', linetype = 'dashed') +
+  #geom_vline(xintercept = 1845, color = '#116530', linetype = 'dashed') +
+#  theme_classic() +
+ # theme(axis.text.y = element_blank(),
+  #      axis.ticks.y=element_blank(),
+   #     axis.title.y = element_blank())
+
+#ggplot(data = normal_clinics_hours_list, aes(y = index)) +
+#  annotate('rect', xmin=0, xmax=800, ymin=0, ymax=64, alpha=.4, fill='#116530')+
+#  annotate('rect', xmin=2000, xmax=2400, ymin=0, ymax=64, alpha=.4, fill='#116530')+
+#  geom_point(aes(x = Open`), col = "blue") #+
+#  geom_point(aes(x = `Monday Close`), col = "red") +
+#  geom_segment(aes(x = `Monday Open`, xend = `Monday Close`, yend = index)) +
+#  geom_vline(xintercept = 800, color = '#116530', linetype = 'dashed') +
+#  geom_vline(xintercept = 2000, color = '#116530', linetype = 'dashed') +
+#  theme_classic() +
+#  theme(axis.text.y = element_blank(),
+#        axis.ticks.y=element_blank(),
+#        axis.title.y = element_blank())
+
+
+```
+
+
+```{r, echo=FALSE}
+#Leaflet Heat Map
+
+# vet_clinic_lat_long <- vet_clinic_open_hours %>% 
+#   left_join(all_geocoded_addresses, by = "full_address") %>% 
+#   drop_na(lat, long)
+# 
+# #vet_clinic_lat_long %>% 
+# #  leaflet() %>%
+# #  addTiles() %>% 
+# #  addHeatmap(lng = vet_clinic_lat_long$long, lat = vet_clinic_lat_long$lat, blur = 40, max = 0.05, radius = 15)
+# 
+# leaflet(vet_clinic_lat_long) %>%
+#   addTiles() %>% 
+#   addHeatmap(
+#     lng = ~long, lat = ~lat,
+#     blur = 60, max = 0.05, radius = 25
+#   )
+
+```
+
+
+```{r, echo=FALSE, warning=FALSE, include = FALSE}
+#vet_clinic_census_tracts <- vet_clinic_open_hours %>% 
+#  left_join(geo_addresses_w_CT, by="full_address") %>% 
+#  filter(RPL_THEMES != -999)
+
+#ggplot(data = vet_clinic_census_tracts, aes(x = RPL_THEMES)) +
+#  geom_histogram()
+
+```
+
+### County Level Analysis
+
+```{r, warning = FALSE, echo = FALSE}
+
+### Reading in data
+###Desktop
+#setwd("C:/Users/john/Documents/GitHub_Data/VCAP-Open-Hours-Project-Data")
+
+###Laptop
+setwd("C:/Users/johnc/Documents/GitHub_Data/VCAP-Open-Hours-Project-Data")
+
+break_points = c(0,50000,100000, 160000)
+
+all_clinics_cleaned_with_hours <- read_csv("vet_clinic_open_hours_cleaned.csv") %>%
+  separate(col = full_census_tract, into = c("census_tract", "county", "state_name"), sep = ", ", remove = FALSE) %>% 
+  mutate(NAME = paste(county, state_name, sep=", ")) %>% 
+  left_join(select(us_counties_dat, NAME, population_estimate, median_income_estimate), by = "NAME") %>% 
+  mutate(income_group = cut(median_income_estimate, breaks = break_points, include.lowest = TRUE, right = FALSE, labels = c("Low Income", "Medium Income", "High Income")))
+
+
+county_level_dat <- read_csv("vet_clinics_open_hours_by_county.csv") %>% 
+  mutate(income_group = cut(median_income_estimate, breaks = break_points, include.lowest = TRUE, right = FALSE, labels = c("Low Income", "Medium Income", "High Income")),
+         has_clinic = case_when(total_vet_clinics == 0 ~ 0,
+                                TRUE ~ 1))
+
+county_level_dat_with_SVI <- read_csv("vet_clinics_open_hours_with_SVI_by_county.csv") %>% 
+  mutate(income_group = cut(median_income_estimate, breaks = break_points, include.lowest = TRUE, right = FALSE, labels = c("Low Income", "Medium Income", "High Income")),
+         has_clinic = case_when(total_vet_clinics == 0 ~ 0,
+                                TRUE ~ 1))
+
+## Creating functions
+
+
+
+```
+
+#### County Level Datatable
+
+```{r, echo = FALSE, warning=FALSE}
+
+
+df <- data.frame(column_name = NULL, min = NULL, mean = NULL, median = NULL, max = NULL, SD = NULL)
+
+for (i in names(county_level_dat)){
+  
+  
+ if (class(county_level_dat[[i]]) == "numeric"){
+   
+   five_number_stats <- county_level_dat_with_SVI %>% 
+    mutate(column_name = i) %>% 
+    group_by(column_name) %>% 
+    summarise(min = min(county_level_dat[[i]]),
+            mean = round(mean(county_level_dat[[i]]),2),
+            median = median(county_level_dat[[i]]),
+            max = max(county_level_dat[[i]]),
+            SD = round(sd(county_level_dat[[i]])),2)
+   
+   df <- rbind(df, five_number_stats)
+   
+
+ }
+  
+
+}
+
+summary_stats <- df %>% 
+  select(-"2")
+
+datatable(summary_stats)
+
+```
+#### Income Group Table
+
+```{r, warning=FALSE, echo=FALSE}
+income_groups <- county_level_dat %>% 
+  group_by(income_group) %>% 
+  summarise(min = min(median_income_estimate),
+            max = max(median_income_estimate))
+ 
+table(county_level_dat$income_group)
+
+income_groups
+
+```
+
+
+#### Percentages for Type of Care and Clinic Type
+
+```{r, echo=FALSE, warning=FALSE}
+
+prop.table(table(all_clinics_cleaned_with_hours$income_group, all_clinics_cleaned_with_hours$clinic_type_text), margin = 1)
+prop.table(table(all_clinics_cleaned_with_hours$income_group, all_clinics_cleaned_with_hours$clinic_type), margin = 1)
+
+```
+
+#### Type of Care Chi Square with Income Group and Cramer V
+
+```{r, warning=FALSE, echo=FALSE}
+chisq.test(table(all_clinics_cleaned_with_hours$income_group, all_clinics_cleaned_with_hours$clinic_type_text))
+cramerV(table(all_clinics_cleaned_with_hours$income_group, all_clinics_cleaned_with_hours$clinic_type_text))
+
+
+```
+
+
+#### Clinic Type Chi Square with Income Group and Cramer V
+
+```{r, warning=FALSE, echo=FALSE}
+chisq.test(table(all_clinics_cleaned_with_hours$income_group, all_clinics_cleaned_with_hours$clinic_type))
+cramerV(table(all_clinics_cleaned_with_hours$income_group, all_clinics_cleaned_with_hours$clinic_type))
+
+```
+
+
+
+
+
+
+
+
+```{r, warning=FALSE, echo=FALSE}
+
+income_groups <- county_level_dat %>% 
+  group_by(income_group) %>% 
+  summarise(min = min(median_income_estimate),
+            max = max(median_income_estimate))
+
+prop_table <- prop.table(table(county_level_dat$income_group, county_level_dat$has_clinic), margin = 1)
+
+chi_test_result <- chisq.test(table(county_level_dat$income_group, county_level_dat$has_clinic))
+
+cram_v_result <- cramerV(table(county_level_dat$income_group, county_level_dat$has_clinic))
+
+# table(county_level_dat$income_group, county_level_dat$total_vet_clinics)
+# 
+# table(county_level_dat$income_group)
+# 
+# ggplot(data = county_level_dat, aes(x = median_income_estimate))+
+#   geom_histogram(binwidth = 10000, color = "black")
+# 
+# ggplot(data = county_level_dat, aes(x = median_income_estimate, y = `Farm/Large Animal`)) +
+#   geom_point()
+# 
+# ggplot(data = county_level_dat, aes(x = income_group, y = `General/Primary`)) +
+#   geom_boxplot()
+# 
+# ggplot(data = county_level_dat, aes(x = income_group, y = `Emergency Care`)) +
+#   geom_boxplot()
+# 
+# ggplot(data = county_level_dat, aes(x = income_group, y = `Low Cost`)) +
+#   geom_boxplot()
+# 
+# ggplot(data = county_level_dat, aes(x = income_group, y = `Mobile/Home Care`)) +
+#   geom_boxplot()
+# 
+# ggplot(data = county_level_dat, aes(x = income_group, y = `Farm/Large Animal`)) +
+#   geom_boxplot()
+# 
+# ggplot(data = county_level_dat, aes(x = income_group, y = `Specialty Care`)) +
+#   geom_boxplot()
+
+
+income_group_by_stats <- county_level_dat_with_SVI %>% 
+  group_by(income_group) %>% 
+  summarise(median_hours = median(total_open_hours),
+            total_clinics = round(sum(total_vet_clinics), 2),
+            total_area = round(sum(AREA_SQMI), 1),
+            median_pop = median(population_estimate)) %>% 
+  mutate(clinics_per_100SQMI = round((total_clinics/total_area), 4)*100)
+
+income_group_states <- county_level_dat_with_SVI %>% 
+  group_by(income_group, state_name) %>% 
+  summarise(count = n()) %>% 
+  pivot_wider(names_from = income_group, values_from = count) %>% 
+  replace_na(list(`Low Income` = 0, `High Income` = 0, `Medium Income` = 0)) %>% 
+  mutate(low_income_percent = round(`Low Income`/sum(`Low Income`), 4)*100,
+         medium_income_percent = round(`Medium Income`/sum(`Medium Income`), 4)*100,
+         high_income_percent = round(`High Income`/sum(`High Income`), 4)*100)
+
+ggplot(data = county_level_dat_with_SVI, aes(x = E_TOTPOP))+
+  geom_histogram(binwidth = 10000)
+
+# ggplot(county_level_dat_with_SVI, aes(x = total_open_hours)) + 
+#   geom_histogram(binwidth = 1) + 
+#   xlim(-1,150)
+# 
+# ggplot(county_level_dat_with_SVI, aes(x = total_open_hours, y = EP_HBURD))+
+#   geom_point()+
+#   xlim(1,20000)
+#   
+# cor(x = county_level_dat_with_SVI$M_HU, county_level_dat_with_SVI$EP_HBURD)
+
+```
+
+#### Income Group and Whether County has Clinic Chi Square and Cramer V
+
+```{r, warning=FALSE, echo=FALSE}
+
+prop_table
+
+chi_test_result
+
+cram_v_result
+
+```
+
+#### Income Group Interesting Stats DT and Percent in Each State
+
+```{r, echo=FALSE, warning=FALSE}
+
+datatable(income_group_by_stats)
+
+datatable(income_group_states)
+
+```
+### Findings/Story
+One of the stories I am seeing here is that while the type of clinic and type of care does not vary too much between the income groups, Almost all high income counties have a clinic while only 70% of the low income counties have a clinic. One has to travel a lot farther to get to a clinic than if one is living in a high income county. I performed a chi square test and a cramer v test on income group and type of care, type of clinics, and whether the county has a clinic or not. While all three were statistically significant, both type of care and type of clinic almost had no association between income group and type of care or type of clinic. However, income group and whether the county has at least one clinic had a cramer v score of 0.2 which I would classify as at least a weak association. 
+
+A large part of this is because higher income counties tend to have a denser population. With that being said, If the goal is for everyone, regardless of where they live, have access to a clinic, it is important that we understand what areas are showing a lack vet clinics and what types of clinics are they missing. Are there other ways of offering access to vet care to lower income and lower densely populated areas beside building clinics there. Perhaps setting up more mobile/at home clinics for basic care.
+
+I believe there are recent articles explaining that lower income groups have a harder time paying for vet care. It is unfortunate these lower income areas also need to travel farther to access a vet clinic.
+
+
+### In Progress...
+
+#### Multiple Linear Regression and Logisical Regression
+
+#### Variables for Multiple Linear Regression
+```{r, echo=FALSE, warning = FALSE, include = FALSE}
+#Income Group is colinear
+mlr_raw_dat <- county_level_dat_with_SVI %>% 
+  select(total_open_hours, population_estimate, M_HU, E_MOBILE, EP_HBURD, total_vet_clinics)
+
+
+
+# Combining the encoded variables back with the original data frame
+final_df <- mlr_raw_dat %>%
+  filter(total_vet_clinics != 0) %>% 
+  select(-total_vet_clinics)
+
+library(rsample)
+set.seed(123) # for reproducibility
+split <- initial_split(final_df, prop = 0.80)
+train_set <- training(split)
+test_set <- testing(split)
+#pairs(final_df)
+
+model_1 <- lm(total_open_hours ~ population_estimate + M_HU + E_MOBILE + EP_HBURD, data = train_set)
+
+predictions <- predict(model_1, newdata = test_set)
+
+mae <- mean(abs(test_set$total_open_hours - predictions))
+
+car::vif(model_1)
+
+```
+
