@@ -37,6 +37,7 @@ library(stringr)
 library(tidycensus)
 library(sf)
 library(tigris)
+library(tidytext)
 
 
 ```
@@ -240,7 +241,26 @@ us_counties <- counties(cb = TRUE, resolution = "500k", year = 2023) %>%
   select(GEOID, NAME)
 
 vet_clinic_open_hours_joined <- st_join(vet_clinic_open_hours_sf, us_counties, join = st_intersects)
-  
+
+
+#Block below used to create word frequency in Clinic Names
+
+# blob <- vet_clinic_open_hours_joined %>% 
+#   unnest_tokens(word, `Company Name`) %>% 
+#   count(word, sort = TRUE)
+# 
+# blob_1 <- blob %>% 
+#   anti_join(stop_words, by = "word")
+# 
+# blob_2 <- blob_1 %>% 
+#   filter(n > 10)
+# 
+# library(readxl)
+# library(writexl)
+# 
+# write_xlsx(blob_2, "clinic_name_frequency_2026.xlsx")
+# 
+# blob <- st_drop_geometry(blob)
 
 ```
 
@@ -264,39 +284,343 @@ VCAS_final <- socio_demo_info %>%
          sales_norm_hh = (SalesVolume_sum/HSE_UNITS)*1000)
 
 
+########################################Updating "Open 24 Hours"
+
+days <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+# Initialize a variable to track the grand total across all days
+total_rows_affected <- 0
+
+# 2. Loop
+for (day in days) {
+  open_col <- paste(day, "Open")
+  close_col <- paste(day, "Close")
+  
+  if (open_col %in% names(vet_clinic_open_hours_joined) && close_col %in% names(vet_clinic_open_hours_joined)) {
+    
+    # Identify rows where EITHER column is "Open 24 Hours"
+    is_24_hours <- (vet_clinic_open_hours_joined[[open_col]] %in% "Open 24 Hours") | 
+                   (vet_clinic_open_hours_joined[[close_col]] %in% "Open 24 Hours")
+    
+    # --- NEW PART: COUNTING ---
+    # Summing the TRUE values gives us the count of affected rows
+    count_for_day <- sum(is_24_hours)
+    
+    # Add to the grand total
+    total_rows_affected <- total_rows_affected + count_for_day
+    
+    # Print a message only if we found something
+    if (count_for_day > 0) {
+      cat(paste(day, ": Updated", count_for_day, "rows.\n"))
+      
+      # Perform the update
+      vet_clinic_open_hours_joined[is_24_hours, c(open_col, close_col)] <- "Open 24 Hours"
+    }
+  }
+}
+
+cat("--------------------------------\n")
+cat(paste("Total rows affected:", total_rows_affected, "\n"))
+
+
+###################################################Updating "Closed"
+
+
+days <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+# Initialize a variable to track the grand total across all days
+total_rows_affected <- 0
+
+# 2. Loop
+for (day in days) {
+  open_col <- paste(day, "Open")
+  close_col <- paste(day, "Close")
+  
+  if (open_col %in% names(vet_clinic_open_hours_joined) && close_col %in% names(vet_clinic_open_hours_joined)) {
+    
+    # Identify rows where EITHER column is "Open 24 Hours"
+    is_24_hours <- (vet_clinic_open_hours_joined[[open_col]] %in% "Closed") | 
+                   (vet_clinic_open_hours_joined[[close_col]] %in% "Closed")
+    
+    # --- NEW PART: COUNTING ---
+    # Summing the TRUE values gives us the count of affected rows
+    count_for_day <- sum(is_24_hours)
+    
+    # Add to the grand total
+    total_rows_affected <- total_rows_affected + count_for_day
+    
+    # Print a message only if we found something
+    if (count_for_day > 0) {
+      cat(paste(day, ": Updated", count_for_day, "rows.\n"))
+      
+      # Perform the update
+      vet_clinic_open_hours_joined[is_24_hours, c(open_col, close_col)] <- "Closed"
+    }
+  }
+}
+
+cat("--------------------------------\n")
+cat(paste("Total rows affected:", total_rows_affected, "\n"))
+
+
+#############################################Block to check if there are any 0000 military times or 2400 military times
+
+days <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+# 2. Define what we are looking for (Text or Numeric)
+targets <- c("0000")
+total_found <- 0
+
+cat("--- Starting Scan ---\n")
+
+# 3. The Loop
+for (day in days) {
+  
+  # specific columns to check for this day
+  cols_to_check <- c(paste(day, "Open"), paste(day, "Close"))
+  
+  for (col in cols_to_check) {
+    
+    # Check if the column exists in the dataframe
+    if (col %in% names(vet_clinic_open_hours_joined)) {
+      
+      # Calculate how many rows have 2400
+      # na.rm = TRUE ensures we don't crash on empty cells
+      count <- sum(vet_clinic_open_hours_joined[[col]] %in% targets, na.rm = TRUE)
+      
+      if (count > 0) {
+        cat(paste("Found", count, "instance(s) in column:", col, "\n"))
+        total_found <- total_found + count
+      }
+    }
+  }
+}
+
+cat("--- Scan Complete ---\n")
+if (total_found == 0) {
+  cat("No '2400' values found.\n")
+} else {
+  cat(paste("Total instances found:", total_found))
+}
+
+
+#######################################Block to check for instances where close time is less than open time, ie 2am close time but 5pm open time
+
+days <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+total_issues <- 0
+
+cat("--- Starting Logic Check ---\n")
+
+for (day in days) {
+  open_col <- paste(day, "Open")
+  close_col <- paste(day, "Close")
+  
+  if (open_col %in% names(vet_clinic_open_hours_joined) && close_col %in% names(vet_clinic_open_hours_joined)) {
+    
+    # 1. Identify rows where BOTH columns are exactly 4 digits
+    # The regex "^[0-9]{4}$" ensures we only grab "0800", not "Closed" or "800"
+    valid_time_format <- grepl("^[0-9]{4}$", vet_clinic_open_hours_joined[[open_col]]) & 
+                         grepl("^[0-9]{4}$", vet_clinic_open_hours_joined[[close_col]])
+    
+    # 2. Extract only those valid numeric-string rows to compare
+    # We use a temporary vector so we don't mess up the original dataframe
+    open_vals <- vet_clinic_open_hours_joined[[open_col]][valid_time_format]
+    close_vals <- vet_clinic_open_hours_joined[[close_col]][valid_time_format]
+    
+    # 3. Check where Close is strictly less than Open
+    # Since they are fixed width (0000), string comparison works:
+    # "0200" < "2200" is TRUE.
+    inverted_times <- close_vals < open_vals
+    
+    count <- sum(inverted_times)
+    
+    if (count > 0) {
+      cat(paste(day, ": Found", count, "cases where Close < Open.\n"))
+      total_issues <- total_issues + count
+      
+    }
+  }
+}
+
+cat("--------------------------------\n")
+cat(paste("Total instances found:", total_issues))
+
+
+
 ### Reading in open hour dataset and 
-vet_clinic_open_hours <- read_csv("VetList2025.csv") %>% 
+#VCOH = vet clinic open hours
+VCOH_std_times <- vet_clinic_open_hours_joined %>%
+  #Creating unique address column
   mutate(unique_address = paste(Address, City, State, `ZIP Code`, sep = ", ")) %>% 
+  #converting miltary time to standard time
   mutate(Monday_Open_st = military_to_standard_char(`Monday Open`),
          Tuesday_Open_st = military_to_standard_char(`Tuesday Open`),
-         Wednesday_open_st = military_to_standard_char(`Wednesday Open`),
-         Thursday_open_st = military_to_standard_char(`Thursday Open`),
-         Friday_open_st = military_to_standard_char(`Friday Open`),
-         Saturday_open_st = military_to_standard_char(`Saturday Open`),
-         Sunday_open_st = military_to_standard_char(`Sunday Open`),
-         Monday_close_st = military_to_standard_char(`Monday Close`),
-         Tuesday_close_st = military_to_standard_char(`Tuesday Close`),
-         Wednesday_close_st = military_to_standard_char(`Wednesday Close`),
-         Thursday_close_st = military_to_standard_char(`Thursday Close`),
-         Friday_close_st = military_to_standard_char(`Friday Close`),
-         Saturday_close_st = military_to_standard_char(`Saturday Close`),
-         Sunday_close_st = military_to_standard_char(`Sunday Close`))
+         Wednesday_Open_st = military_to_standard_char(`Wednesday Open`),
+         Thursday_Open_st = military_to_standard_char(`Thursday Open`),
+         Friday_Open_st = military_to_standard_char(`Friday Open`),
+         Saturday_Open_st = military_to_standard_char(`Saturday Open`),
+         Sunday_Open_st = military_to_standard_char(`Sunday Open`),
+         Monday_Close_st = military_to_standard_char(`Monday Close`),
+         Tuesday_Close_st = military_to_standard_char(`Tuesday Close`),
+         Wednesday_Close_st = military_to_standard_char(`Wednesday Close`),
+         Thursday_Close_st = military_to_standard_char(`Thursday Close`),
+         Friday_Close_st = military_to_standard_char(`Friday Close`),
+         Saturday_Close_st = military_to_standard_char(`Saturday Close`),
+         Sunday_Close_st = military_to_standard_char(`Sunday Close`)) %>% 
+  # I am created a date column for each of the times so I can use diff time to get hours for clinics that have a close military time less than the open time
+  mutate(Monday_Open_Date = ymd_hm(paste("2026-01-13", Monday_Open_st, sep = " ")),
+         Monday_Close_Date = case_when(`Monday Close` < `Monday Open` ~ ymd_hm(paste("2026-01-13", Monday_Close_st, sep = " ")) + days(1),
+                                       TRUE ~ ymd_hm(paste("2026-01-13", Monday_Close_st, sep = " "))),
+         Tuesday_Open_Date = ymd_hm(paste("2026-01-13", Tuesday_Open_st, sep = " ")),
+         Tuesday_Close_Date = case_when(`Tuesday Close` < `Tuesday Open` ~ ymd_hm(paste("2026-01-13", Tuesday_Close_st, sep = " ")) + days(1),
+                                       TRUE ~ ymd_hm(paste("2026-01-13", Tuesday_Close_st, sep = " "))),
+         Wednesday_Open_Date = ymd_hm(paste("2026-01-13", Wednesday_Open_st, sep = " ")),
+         Wednesday_Close_Date = case_when(`Wednesday Close` < `Wednesday Open` ~ ymd_hm(paste("2026-01-13", Wednesday_Close_st, sep = " ")) + days(1),
+                                       TRUE ~ ymd_hm(paste("2026-01-13", Wednesday_Close_st, sep = " "))),
+         Thursday_Open_Date = ymd_hm(paste("2026-01-13", Thursday_Open_st, sep = " ")),
+         Thursday_Close_Date = case_when(`Thursday Close` < `Thursday Open` ~ ymd_hm(paste("2026-01-13", Thursday_Close_st, sep = " ")) + days(1),
+                                       TRUE ~ ymd_hm(paste("2026-01-13", Thursday_Close_st, sep = " "))),
+         Friday_Open_Date = ymd_hm(paste("2026-01-13", Friday_Open_st, sep = " ")),
+         Friday_Close_Date = case_when(`Friday Close` < `Friday Open` ~ ymd_hm(paste("2026-01-13", Friday_Close_st, sep = " ")) + days(1),
+                                       TRUE ~ ymd_hm(paste("2026-01-13", Friday_Close_st, sep = " "))),
+         Saturday_Open_Date = ymd_hm(paste("2026-01-13", Saturday_Open_st, sep = " ")),
+         Saturday_Close_Date = case_when(`Saturday Close` < `Saturday Open` ~ ymd_hm(paste("2026-01-13", Saturday_Close_st, sep = " ")) + days(1),
+                                       TRUE ~ ymd_hm(paste("2026-01-13", Saturday_Close_st, sep = " "))),
+         Sunday_Open_Date = ymd_hm(paste("2026-01-13", Sunday_Open_st, sep = " ")),
+         Sunday_Close_Date = case_when(`Sunday Close` < `Sunday Open` ~ ymd_hm(paste("2026-01-13", Sunday_Close_st, sep = " ")) + days(1),
+                                       TRUE ~ ymd_hm(paste("2026-01-13", Sunday_Close_st, sep = " ")))) %>%
+  
+  #creating TRUE/FALSE column for whether the clinic included their hours.
+  mutate(included_hrs = case_when(is.na(`Monday Open`) == TRUE & is.na(`Monday Close`) == TRUE & is.na(`Tuesday Open`) == TRUE & is.na(`Tuesday Close`) == TRUE & is.na(`Wednesday Open`) == TRUE & is.na(`Wednesday Close`) == TRUE & is.na(`Thursday Open`) == TRUE & is.na(`Thursday Close`) == TRUE & is.na(`Friday Open`) == TRUE & is.na(`Friday Close`) == TRUE & is.na(`Saturday Open`) == TRUE & is.na(`Saturday Close`) == TRUE & is.na(`Sunday Open`) == TRUE & is.na(`Sunday Close`) == TRUE ~ FALSE,
+                                     TRUE ~ TRUE)) %>%
+  #converting the employee size and sales volume column to numeric
+    mutate(location_employee_size_actual = as.numeric(`Location Employee Size Actual`),
+         location_sales_volume_actual = as.numeric(str_remove_all(`Location Sales Volume Actual`, "\\D")))
+
+get_segment_hours <- function(start_dt, end_dt, segment_start_time, segment_end_time) {
+  # Logic to calculate hours between specific time bounds
+  # (You can encapsulate your case_when logic here once)
+}
+
+simplified_df <- VCOH_std_times %>%
+  # Convert to long format: One row per Clinic per Day
+  pivot_longer(
+    cols = matches("Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday"),
+    names_to = c("Day", ".value"),
+    names_pattern = "([A-Za-z]+)[_ ](.+)"
+  ) %>%
+  # Perform calculations ONCE for all days
+  mutate(
+    total_hours = if_else(Close == "Open 24 Hours", 24, as.numeric(difftime(Close_Date, Open_Date, units = "hours"))),
+    total_hours = replace_na(total_hours, 0),
+    
+    # Example logic for "After 6 PM" (generalized)
+    is_24_hr = Close == "Open 24 Hours",
+    is_normal = (Close > Open & Open <= 1600 & Close >= 900),
+    is_limbo = (Close > 1700 & Close < 1900),
+    
+    # Emergency logic (generalized)
+    is_emergency = case_when(
+      is_24_hr ~ TRUE,
+      Open > Close ~ TRUE, # Crossed midnight
+      Day %in% c("Saturday", "Sunday") ~ TRUE,
+      Close >= 2100 ~ TRUE,
+      TRUE ~ FALSE
+    )
+  ) %>%
+  # 2. Summarize back to the Clinic level
+  group_by(clinic_id) %>% # Assuming you have a clinic ID
+  mutate(
+    has_24_hr = any(is_24_hr),
+    has_emergency = any(is_emergency),
+    # ... other aggregate flags
+  ) %>%
+  mutate(clinic_type = case_when(
+    has_24_hr ~ "24 Hour Clinic",
+    has_emergency ~ "Emergency Clinic",
+    # ... rest of your hierarchy
+    TRUE ~ "Normal Clinic"
+  ))
+
+duplicates <- VCOH_std_times %>%
+  add_count(unique_address, name = "n_1") %>%
+  filter(n_1> 1) %>%
+  arrange(unique_address) %>% 
+  select(`Company Name`, `unique_address`) %>% 
+  filter(str_detect(str_to_lower(`Company Name`), "dvm") == FALSE) %>% 
+  add_count(unique_address, name = "n_2")
 
 
-sum(is.na(vet_clinic_open_hours$Latitude))
-sum(is.na(vet_clinic_open_hours$Longitude))
+duplicates <- VCOH_std_times %>%
+  # 1. Identify initial duplicates
+  add_count(unique_clinic_location, name = "n_1") %>%
+  filter(n_1  > 1) %>%
+  
+  # 2. Remove the "dvm" rows
+  # (using ! is cleaner than == FALSE)
+  filter(!str_detect(str_to_lower(`Company Name`), "dvm")) %>%
+  
+  # 3. Recount to see who is STILL a duplicate
+  add_count(unique_clinic_location, name = "n_2") %>%
+  
+  # 4. CRITICAL FIX: Filter again. 
+  # If n_2 is 1, the address is no longer a duplicate (you deleted its partner).
+  
+  # 5. Arrange and Select last so you don't lose columns you might need earlier
+  arrange(unique_clinic_location) %>%
+  select(`Company Name`, unique_address, unique_clinic_location, n_1, n_2) 
+
+
+blob <- VCOH_std_times %>% 
+  filter(unique_clinic_location == "Animal Medical Ctr-Pleasanton_3901 Santa Rita Rd")
+
+
+sum(duplicated(VCOH_std_times))
+
+
+included_hrs_clinics <- VCOH_std_times %>% 
+  filter(included_hrs == TRUE)
+
+no_hrs_clinics <- VCOH_std_times %>% 
+  filter(included_hrs == FALSE)
+
+
+#Can you write me code in python that will take an address, paste it into google maps, search it, and use web scraping to extract information as to whether multiple clinics at the location, and if there is only one, return the name of that clinic.
 
 
 
+blob <- VCOH_std_times %>%
+  group_by(included_hrs) %>% 
+  summarise(median_emp_size = median(location_employee_size_actual),
+            mean_emp_size = mean(location_employee_size_actual),
+            std_emp_size = sd(location_employee_size_actual),
+            median_sales = median(location_sales_volume_actual),
+            mean_sales = mean(location_sales_volume_actual),
+            std_sales = sd(location_sales_volume_actual))
+
+no_time_clinics %>%
+  filter(location_sales_volume_actual > 2500000 & location_sales_volume_actual < 20000000) %>% 
+  ggplot(aes(x = included_hrs, y = location_sales_volume_actual))+
+  geom_boxplot() +
+  geom_count()
+
+min(no_time_clinics$location_employee_size_actual)
+  
+
+blob <- no_time_clinics %>% 
+  select(`Company Name`, unique_address, included_hrs, `Monday Open`, `Monday Close`, Monday_Open_st, Monday_Close_st,
+         `Tuesday Open`, `Tuesday Close`, Tuesday_Open_st, Tuesday_Close_st,
+         `Wednesday Open`, `Wednesday Close`, Wednesday_Open_st, Wednesday_Close_st,
+         `Thursday Open`, `Thursday Close`, Thursday_Open_st, Thursday_Close_st,
+         `Friday Open`, `Friday Close`, Friday_Open_st, Friday_Close_st,
+         `Saturday Open`, `Saturday Close`, Saturday_Open_st, Saturday_Close_st,
+         `Sunday Open`, `Sunday Close`, Sunday_Open_st, Sunday_Close_st)
 
 
+```
 
 
-
-
-
-
-
+```{r}
 
 connecticut_counties <- SVI_Counties %>% 
   filter(str_detect(LOCATION, "Connecticut"))
