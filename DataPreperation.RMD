@@ -49,7 +49,48 @@ library(tidytext)
 setwd("C:/Users/john/Documents/GitHub_Data/VCAP-Open-Hours-Project-2025-Data")
 vet_clinic_open_hours <- read_csv("VetList2025.csv")
 SVI_index_2022 <- read_csv("SVI_2022_US_county.csv")
+SVI_index_2022_check <- SVI_index_2022 %>% 
+  select(FIPS, LOCATION, EPL_POV150, EPL_NOVEH, EPL_LIMENG)
+clinics_checked <- read_csv("clinics_checked.csv")
+VCAS_2022_score <- read_csv("VCAS_2022_score_clean.csv") %>% 
+  mutate(
+    # This ensures every value is 5 characters long by adding "0" to the left
+    FIPS = str_pad(FIPS, width = 5, side = "left", pad = "0")
+  )
+vcas_errors <- read_csv("error_check_vcas_score_2022.csv")
+SVI_index_2016 <- read_csv("SVI_2016_US_county.csv")
+SVI_index_2018 <- read_csv("SVI_2018_US_county.csv")
+SVI_index_2020 <- read_csv("SVI_2020_US_county.csv")
 
+animal_per_hh_values <- VCAS_2022_score %>% 
+  select(FIPS, ST_cats_per_HH, ST_dogs_per_HH, ST_pets_per_HH)
+
+# blob <- SVI_index_2018 %>% 
+#   left_join(VCAS_2022_score, by = "FIPS") %>% 
+#   select(COUNTY.x, FIPS, percentile_below_poverty, percentile_percapitaincome, percentile_novehicle, percentil_englishltw, RPL_THEME1, RPL_THEME2, RPL_THEME3, RPL_THEME4, percentile_norm_pets, percentile_sum, percentile_index, percentRankCheck, `...68`) %>% 
+#   drop_na() %>% 
+#   rowwise() %>%
+#   mutate(sums = sum(RPL_THEME1, RPL_THEME2, RPL_THEME3, RPL_THEME4, na.rm = TRUE),
+#          sums_variable_specific = sum(percentile_below_poverty, percentile_percapitaincome, percentile_novehicle, percentil_englishltw),
+#          percentile_sum_check = round(sums_variable_specific + percentile_norm_pets, 2)) %>% 
+#   ungroup() %>% 
+#   mutate(percentile_index_check = percent_rank(desc(percentile_sum_check)),
+#          difference = percentile_index - percentile_index_check,
+#          abs_diff = abs(difference),
+#          abs_diff_2 = abs(percentile_index - percentRankCheck),
+#          abs_diff_3 = abs(percentile_index - `...68`))
+# 
+# sum(blob$abs_diff)
+# sum(blob$abs_diff_2)
+# sum(blob$abs_diff_3)
+# 
+# 
+# blob %>% 
+#   ggplot() +
+#   geom_histogram(aes(x = abs_diff), bins = 10, fill = "blue", alpha = 0.5) +
+#   geom_histogram(aes(x = abs_diff_2), bins = 10, fill = "red", alpha = 0.5) +
+#   xlim(0, 1) +
+#   theme_minimal()
 
 
 military_to_standard_char <- function(x) {
@@ -105,6 +146,47 @@ createTimeDF <- function(df, col_name){
 
 ```
  
+
+### Testing VCAS Score
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+percent_rank_reverse <- function(x) {
+  # Negating x reverses the order (highest value gets rank 1)
+  # ties.method = "average" ensures tied values share the mean rank
+  r <- rank(-x, ties.method = "average", na.last = "keep")
+  
+  # Scale to 0-1 range
+  (r - 1) / (sum(!is.na(x)) - 1)
+}
+
+test_df <- VCAS_2022_score %>% 
+  mutate(population_cat_county = ST_cats_per_HH * `@2019TotalHouseholds`,
+         population_dog_county = ST_dogs_per_HH * `@2019TotalHouseholds`,
+         population_pets_county = ST_pets_per_HH * `@2019TotalHouseholds`,
+         emp_norm_hh_check = (NumberofEmployees_sum/`@2019TotalHouseholds`)*1000,
+         emp_norm_pets_check = (NumberofEmployees_sum/population_pets_county)*1000,
+         sales_norm_hh_check = (SalesVolume_sum/`@2019TotalHouseholds`)*1000,
+         percentile_norm_pets_check = (rank(-emp_norm_pets, ties.method = "average") - 1) / (n() - 1),
+         percentile_sum_check = round(percentile_percapitaincome + percentile_below_poverty + percentile_novehicle + percentil_englishltw + percentile_norm_pets, 2),
+         percentile_index_check = percent_rank(desc(percentile_sum)),
+         manual_rank = (min_rank(percentile_sum) - 1) / (n() - 1),
+         percent_rank_average = percent_rank_reverse(percentile_sum),
+         index_score_check = round(percent_rank_average * 100, 2),
+         error = abs(percentile_norm_pets - percentile_norm_pets_check))
+
+
+blob <- vcas_errors %>% 
+  group_by(STATE_NAME) %>% 
+  summarise(total_error = sum(diff),
+            median_error = median(diff))
+  
+
+
+
+```
+
+
 ### Creating Demographic/Socioeconomic County Datatable
 
 ```{r}
@@ -149,29 +231,51 @@ SVI_prepped <- SVI_index_2022 %>%
 
 v23 <- load_variables(2023, "acs1", cache = TRUE)
 
-variables_list = c(POPULATION = "B01001_001",
-                   WHITE = "B01001A_001",
-                   BLACK = "B01001B_001",
-                   HISPANIC = "B01001I_001",
-                   MULT_RACE = "B01001G_001",
-                   AVE_HH_SZ = "B25010_001",
-                   HSE_UNITS = "B11011_001",
-                   VACANT = "B25002_003",
-                   OWNER_OCC = "B25003_002",
-                   RENTER_OCC = "B25003_003",
-                   MEDIAN_HOUSEHOLD_INCOME_2023 = "B19019_001")
+variables_list = c(POPULATION_2024 = "B01001_001",
+                   WHITE_2024 = "B01001A_001",
+                   BLACK_2024 = "B01001B_001",
+                   HISPANIC_2024 = "B01001I_001",
+                   MULT_RACE_2024 = "B01001G_001",
+                   AVE_HH_SZ_2024 = "B25010_001",
+                   HSE_UNITS_2024 = "B11011_001",
+                   VACANT_2024 = "B25002_003",
+                   OWNER_OCC_2024 = "B25003_002",
+                   RENTER_OCC_2024 = "B25003_003",
+                   TOTAL_HOUSHOLDS_2024 = "B11001_001",
+                   MEDIAN_HOUSEHOLD_INCOME_2024 = "B19019_001",
+                   E_POV_2024 = "S1701_C01_040",
+                   E_TOTPOP_2024 = "S1701_C01_001",
+                   E_LIMENG_1_2024 = "B16005_007",
+                   E_LIMENG_2_2024 = "B16005_008",
+                   E_LIMENG_3_2024 = "B16005_012",
+                   E_LIMENG_4_2024 = "B16005_013",
+                   E_LIMENG_5_2024 = "B16005_017",
+                   E_LIMENG_6_2024 = "B16005_018",
+                   E_LIMENG_7_2024 = "B16005_022",
+                   E_LIMENG_8_2024 = "B16005_023",
+                   E_LIMENG_9_2024 = "B16005_029",
+                   E_LIMENG_10_2024 = "B16005_030",
+                   E_LIMENG_11_2024 = "B16005_034",
+                   E_LIMENG_12_2024 = "B16005_035",
+                   E_LIMENG_13_2024 = "B16005_039",
+                   E_LIMENG_14_2024 = "B16005_040",
+                   E_LIMENG_15_2024 = "B16005_044",
+                   E_LIMENG_16_2024 = "B16005_045",
+                   E_LIMENG_Total_2024 = "B16005_001",
+                   E_NOVEH_2024 = "DP04_0058",
+                   EP_NOVEH_2024 = "DP04_0058P")
 
 census_data <- get_acs(
   geography = "county",      # "tract", "place", "state", etc.
   variables = variables_list,
   state = NULL, # Median Gross Rent
-  year = 2023,               # Most recent 1-year data
+  year = 2024,               # Most recent 1-year data
   survey = "acs5", # Use "acs1" for 2024; "acs5" for 2019-2023
   geometry = TRUE,
 ) %>% 
   mutate(ALAND_calculated = st_area(geometry),
          ALAND = as.numeric(ALAND_calculated),
-         SQ_MILES = ALAND * 3.86102e-7)
+         SQ_MILES_2024 = ALAND * 3.86102e-7)
 
 ACS_values <- census_data %>% 
   select(GEOID, variable, estimate) %>% 
@@ -179,24 +283,43 @@ ACS_values <- census_data %>%
   st_drop_geometry()
 
 county_info <- census_data %>% 
-  select(GEOID, NAME, SQ_MILES) %>% 
+  select(GEOID, NAME, SQ_MILES_2024) %>% 
   st_drop_geometry() %>% 
   unique()
 
 socio_demo_info <- county_info %>% 
   left_join(ACS_values, by = "GEOID") %>% 
-  mutate(STATE_NAME = str_split_i(NAME, ",", 2),
+  left_join(animal_per_hh_values, by = c("GEOID" = "FIPS")) %>%
+  mutate(STATE_NAME = str_trim(str_split_i(NAME, ",", 2)),
          LOCATION = NAME,
          NAME = str_split_i(NAME, " ", 1),
          STATE_FIPS = as.numeric(str_sub(GEOID, 1,2)),
          CNTY_FIPS = str_sub(GEOID, 3,5),
          FIPS = paste0(STATE_FIPS, CNTY_FIPS),
          CNTY_FIPS = as.numeric(CNTY_FIPS),
-         ST = STATE_FIPS, 
-         POP_SQMI = POPULATION/SQ_MILES,
+         ST = STATE_FIPS,
+         ST_ABBR = state.abb[match(STATE_NAME, state.name)],
+         POP_SQMI_2024 = POPULATION_2024/SQ_MILES_2024,
          COUNTY = NAME) %>% 
-  left_join(state_fips_df, by = "STATE_FIPS") %>% 
+  filter(STATE_NAME != "Puerto Rico") %>% 
+  mutate(EP_POV150_2024 = round((E_POV_2024/E_TOTPOP_2024)*100, 1),
+         EPL_POV150_2024 = round(percent_rank(EP_POV150_2024),4),
+         E_LIMENG_2024 = E_LIMENG_1_2024 + E_LIMENG_2_2024 + E_LIMENG_3_2024 +
+                   E_LIMENG_4_2024 + E_LIMENG_5_2024 + E_LIMENG_6_2024 +
+                   E_LIMENG_7_2024 + E_LIMENG_8_2024 + E_LIMENG_9_2024 +
+                   E_LIMENG_10_2024 + E_LIMENG_11_2024 + E_LIMENG_12_2024 +
+                   E_LIMENG_13_2024 + E_LIMENG_14_2024 + E_LIMENG_15_2024 +
+                   E_LIMENG_16_2024,
+         EP_LIMENG_2024 = round((E_LIMENG_2024/E_LIMENG_Total_2024)*100, 1),
+         EPL_LIMENG_2024 = round(percent_rank(EP_LIMENG_2024),4),
+         EPL_NOVEH_2024 = round(percent_rank(EP_NOVEH_2024), 4),
+         EPL_MEDIAN_HOUSEHOLD_INCOME_2024 = round(1-percent_rank(MEDIAN_HOUSEHOLD_INCOME_2024), 4)) %>% 
   left_join(SVI_prepped, by = c("GEOID" = "FIPS"))
+
+#write_csv(socio_demo_info, "socio_demo_info_check.csv")
+
+#  left_join(state_fips_df, by = "STATE_FIPS") %>% 
+#  left_join(SVI_prepped, by = c("GEOID" = "FIPS"))
 
 ### SELECT NAMES FOR THE FINAL DF
 
@@ -208,6 +331,9 @@ socio_demo_info <- county_info %>%
 
 
 ```{r}
+sum(is.na(vet_clinic_open_hours$Address))
+
+#We created the unique clinic identifier this way so we could identify clinics that are mostlikey the same, but have multiple addresses
 duplicate_clinics_names_prep_df <- vet_clinic_open_hours %>% 
   mutate(unique_clinic = paste0(`Company Name`, "_", `City`, "_", `State`)) %>% 
   group_by(unique_clinic) %>% 
@@ -227,12 +353,19 @@ duplicates_df <- duplicates_df %>%
   select(`Company Name`, Address, City, State, `ZIP Code`, `Location Sales Volume Actual`, `Location Employee Size Actual`) %>% 
   group_by(`Company Name`) %>% 
   filter(`Location Sales Volume Actual` == min(`Location Sales Volume Actual`)) %>% 
-  mutate(unique_clinic_location = paste0(`Company Name`,"_", Address))
+  mutate(unique_address = paste(Address, City, State, `ZIP Code`, sep = ", ")) %>% 
+  mutate(unique_clinic_location = paste0(`Company Name`,"_", unique_address))
+
+ 
+
 
 clinics_to_remove_list <- duplicates_df$unique_clinic_location
 
+
+
 vet_clinic_open_hours_deduped <- vet_clinic_open_hours %>% 
-  mutate(unique_clinic_location = paste0(`Company Name`,"_", Address)) %>% 
+  mutate(unique_address = paste(Address, City, State, `ZIP Code`, sep = ", ")) %>% 
+  mutate(unique_clinic_location = paste0(`Company Name`,"_", unique_address)) %>% 
   filter(!unique_clinic_location %in% clinics_to_remove_list)
 
 vet_clinic_open_hours_sf <- st_as_sf(vet_clinic_open_hours_deduped, coords = c("Longitude", "Latitude"), crs = 4269)
@@ -280,8 +413,40 @@ vet_clinic_values <- vet_clinic_open_hours_joined %>%
 
 VCAS_final <- socio_demo_info %>% 
   left_join(vet_clinic_values, by = "GEOID") %>% 
-  mutate(emp_norm_hh = (NumberofEmployees_sum/HSE_UNITS)*1000,
-         sales_norm_hh = (SalesVolume_sum/HSE_UNITS)*1000)
+  mutate(population_cat_county = ST_cats_per_HH*TOTAL_HOUSHOLDS_2024,
+         population_dog_county = ST_dogs_per_HH*TOTAL_HOUSHOLDS_2024,
+         population_pets_county = ST_pets_per_HH*TOTAL_HOUSHOLDS_2024,
+         emp_norm_hh = (NumberofEmployees_sum/TOTAL_HOUSHOLDS_2024)*1000,
+         emp_norm_pets = (NumberofEmployees_sum/population_pets_county)*1000,
+         sales_norm_hh = (SalesVolume_sum/TOTAL_HOUSHOLDS_2024)*1000,
+         sales_norm_pets = (SalesVolume_sum/population_pets_county)*1000,
+         percentile_norm_pets = (rank(-emp_norm_pets, ties.method = "average") - 1) / (n() - 1),
+         percentile_sum = EPL_LIMENG_2024 + EPL_POV150_2024 + EPL_NOVEH_2024 + EPL_MEDIAN_HOUSEHOLD_INCOME_2024 + percentile_norm_pets,
+         percentile_index =  (rank(-percentile_sum, ties.method = "average") - 1) / (n() - 1),
+         index_score = round(percentile_index * 100, 2),
+         `sales/employees` = SalesVolume_sum/NumberofEmployees_sum) %>% 
+  filter(!STATE_NAME %in% c("Alaska", "Hawaii")) %>% 
+  replace_na(list(location_employee_size_actual = 0,
+                  location_sales_volume_actual = 0,
+                  NumberofEmployees_sum = 0,
+                  NumberofEmployees_mean = 0,
+                  SalesVolume_sum = 0,
+                  SalesVolume_mean = 0,
+                  N_clinics = 0,
+                  emp_norm_hh = 0,
+                  emp_norm_pets = 0,
+                  sales_norm_hh = 0,
+                  sales_norm_pets = 0,
+                  `sales/employees` = 0)) %>% 
+  select(NAME, STATE_NAME, STATE_FIPS, CNTY_FIPS, FIPS, POPULATION_2024, POP_SQMI_2024, WHITE_2024, BLACK_2024, HISPANIC_2024, MULT_RACE_2024, AVE_HH_SZ_2024, HSE_UNITS_2024, VACANT_2024, OWNER_OCC_2024, RENTER_OCC_2024, MEDIAN_HOUSEHOLD_INCOME_2024, ST, ST_ABBR, COUNTY, LOCATION, E_TOTPOP_2024, `Households1`, PeopleBelow150Poverty, PeopleWithHousingCostBurden, Disabledpop, Minoritypop, Speakenglishltw, novehiclepop, PercentBelow150Poverty, PercentWithHousingCostBurden, percent_unemployed, percent_disabled, percent_minority, percent_englishltw, percent_novehicle, EPL_POV150_2024, EPL_MEDIAN_HOUSEHOLD_INCOME_2024, EPL_LIMENG_2024, EPL_NOVEH_2024, ST_cats_per_HH, ST_dogs_per_HH, ST_pets_per_HH, NumberofEmployees_sum, NumberofEmployees_mean, SalesVolume_sum, SalesVolume_mean, N_clinics, emp_norm_hh, emp_norm_pets, percentile_norm_pets, percentile_sum, percentile_index, index_score, sales_norm_hh, sales_norm_pets, `sales/employees`, geometry)
+
+blob <- VCAS_final %>% 
+  select(NAME, STATE_NAME, MEDIAN_HOUSEHOLD_INCOME_2024, EPL_MEDIAN_HOUSEHOLD_INCOME_2024)
+
+write_csv(VCAS_final, "VCAS_2026_Score.csv")
+
+blob <- VCAS_2022_score %>% 
+  mutate(check_)
 
 
 ########################################Updating "Open 24 Hours"
@@ -502,6 +667,9 @@ get_segment_hours <- function(start_dt, end_dt, segment_start_time, segment_end_
   # (You can encapsulate your case_when logic here once)
 }
 
+VCOH_std_times$clinic_id <- 1:nrow(VCOH_std_times)
+
+
 simplified_df <- VCOH_std_times %>%
   # Convert to long format: One row per Clinic per Day
   pivot_longer(
@@ -542,16 +710,7 @@ simplified_df <- VCOH_std_times %>%
     TRUE ~ "Normal Clinic"
   ))
 
-duplicates <- VCOH_std_times %>%
-  add_count(unique_address, name = "n_1") %>%
-  filter(n_1> 1) %>%
-  arrange(unique_address) %>% 
-  select(`Company Name`, `unique_address`) %>% 
-  filter(str_detect(str_to_lower(`Company Name`), "dvm") == FALSE) %>% 
-  add_count(unique_address, name = "n_2")
-
-
-duplicates <- VCOH_std_times %>%
+duplicates_to_remove <- VCOH_std_times %>%
   # 1. Identify initial duplicates
   add_count(unique_clinic_location, name = "n_1") %>%
   filter(n_1  > 1) %>%
@@ -568,7 +727,42 @@ duplicates <- VCOH_std_times %>%
   
   # 5. Arrange and Select last so you don't lose columns you might need earlier
   arrange(unique_clinic_location) %>%
-  select(`Company Name`, unique_address, unique_clinic_location, n_1, n_2) 
+  filter(!is.na(Address)) %>% 
+  select(`Company Name`, unique_address, unique_clinic_location, n_1, n_2, location_sales_volume_actual, clinic_id) %>%
+  group_by(unique_clinic_location) %>% 
+  filter(location_sales_volume_actual == max(location_sales_volume_actual, na.rm = TRUE)) %>% 
+  slice(1) %>% 
+  ungroup()
+
+clinics_checked$unique_identifier <- paste0(clinics_checked$`Company Name`, "_", clinics_checked$unique_address)
+
+
+
+duplicates <- VCOH_std_times %>%
+  filter(!clinic_id %in% duplicates_to_remove$clinic_id) %>% 
+  add_count(unique_address, name = "n_1") %>%
+  filter(n_1> 1) %>%
+  arrange(unique_address) %>% 
+  select(`Company Name`, `unique_address`) %>% 
+  filter(str_detect(str_to_lower(`Company Name`), "dvm") == FALSE) %>% 
+  add_count(unique_address, name = "n_2")
+
+clinics_checked <- clinics_checked %>% 
+  mutate(result_condensed = str_extract(result, "^[^:]+"))
+
+single_clinics <- clinics_checked %>% 
+  filter(result_condensed == "SINGLE")
+
+multi_clinics <- clinics_checked %>% 
+  filter(result_condensed == "MULTI-TENANT")
+
+#write_csv(duplicates, "clinics_to_check.csv")
+
+VCOH_std_times_deduped <- VCOH_std_times %>% 
+  filter(!clinic_id %in% duplicates_to_remove$clinic_id) %>% 
+  
+
+ 
 
 
 blob <- VCOH_std_times %>% 
