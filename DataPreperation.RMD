@@ -13,8 +13,13 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r, include=FALSE}
 
 ### Reading in Libraries
-
-
+library(readr)
+library(lubridate)
+library(tidyverse)
+library(tidycensus)
+library(tidytext)
+library(sf)
+library(tigris)
 ```
 
 
@@ -224,9 +229,10 @@ socio_demo_info <- county_info %>%
 
 ```
 
-
+#### This prepares cleaning for both the VCAS Score and the data analysis data set
 
 ```{r}
+
 sum(is.na(vet_clinic_open_hours$Address))
 
 #We created the unique clinic identifier this way so we could identify clinics that are mostlikey the same, but have multiple addresses
@@ -252,12 +258,7 @@ duplicates_df <- duplicates_df %>%
   mutate(unique_address = paste(Address, City, State, `ZIP Code`, sep = ", ")) %>% 
   mutate(unique_clinic_location = paste0(`Company Name`,"_", unique_address))
 
- 
-
-
 clinics_to_remove_list <- duplicates_df$unique_clinic_location
-
-
 
 vet_clinic_open_hours_deduped <- vet_clinic_open_hours %>% 
   mutate(unique_address = paste(Address, City, State, `ZIP Code`, sep = ", ")) %>% 
@@ -271,10 +272,34 @@ us_counties <- counties(cb = TRUE, resolution = "500k", year = 2023) %>%
 
 vet_clinic_open_hours_joined <- st_join(vet_clinic_open_hours_sf, us_counties, join = st_intersects)
 
+#This block was used for finding the clinics with the same address but different clinic name
+duplicates <- vet_clinic_open_hours_joined %>%
+  add_count(unique_address, name = "n_1") %>%
+  filter(n_1> 1) %>%
+  arrange(unique_address) %>% 
+  select(`Company Name`, `unique_address`) %>% 
+  filter(str_detect(str_to_lower(`Company Name`), "dvm") == FALSE) %>% 
+  add_count(unique_address, name = "n_2")
+
+#write_csv(duplicates, "clinics_to_check.csv")
+
+clinics_checked <- clinics_checked %>% 
+  mutate(result_condensed = str_extract(result, "^[^:]+"))
+
+single_clinics <- clinics_checked %>% 
+  filter(result_condensed == "SINGLE") %>% 
+  
+
+multi_clinics <- clinics_checked %>% 
+  filter(result_condensed == "MULTI-TENANT")
+
 
 ```
 
 
+## This Block is used for recreating the original VCAS score
+
+My reasoning for not being worried about not having every clinic deduped is because it was not deduped for the previous score.
 
 ```{r, include=FALSE}
 
@@ -318,16 +343,25 @@ VCAS_final <- socio_demo_info %>%
   select(NAME, STATE_NAME, STATE_FIPS, CNTY_FIPS, FIPS, POPULATION_2024, POP_SQMI_2024, WHITE_2024, BLACK_2024, HISPANIC_2024, MULT_RACE_2024, AVE_HH_SZ_2024, HSE_UNITS_2024, VACANT_2024, OWNER_OCC_2024, RENTER_OCC_2024, MEDIAN_HOUSEHOLD_INCOME_2024, ST, ST_ABBR, COUNTY, LOCATION, E_TOTPOP_2024, `Households1`, PeopleBelow150Poverty, PeopleWithHousingCostBurden, Disabledpop, Minoritypop, Speakenglishltw, novehiclepop, PercentBelow150Poverty, PercentWithHousingCostBurden, percent_unemployed, percent_disabled, percent_minority, percent_englishltw, percent_novehicle, EPL_POV150_2024, EPL_MEDIAN_HOUSEHOLD_INCOME_2024, EPL_LIMENG_2024, EPL_NOVEH_2024, ST_cats_per_HH, ST_dogs_per_HH, ST_pets_per_HH, NumberofEmployees_sum, NumberofEmployees_mean, SalesVolume_sum, SalesVolume_mean, N_clinics, emp_norm_hh, emp_norm_pets, percentile_norm_pets, percentile_sum, percentile_index, index_score, sales_norm_hh, sales_norm_pets, `sales/employees`, geometry)
 
 
+#Comment this out when you want to re run for the new VCAS score
 #write_csv(VCAS_final, "VCAS_2026_Score.csv")
 
 
+```
+
+
+
+# This prepares the open and closed hours
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
 
 ########################################Updating "Open 24 Hours"
+#this block of code updates instances where an open or close time value is "Open 24 Hours" but the other one gives a time. For these instances, we update the values so open and close say "Open 24 Hours".
 
 days <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 # Initialize a variable to track the grand total across all days
-total_rows_affected <- 0
+total_instances <- 0
 
 # 2. Loop
 for (day in days) {
@@ -345,11 +379,11 @@ for (day in days) {
     count_for_day <- sum(is_24_hours)
     
     # Add to the grand total
-    total_rows_affected <- total_rows_affected + count_for_day
+    total_instances <- total_instances + count_for_day
     
     # Print a message only if we found something
     if (count_for_day > 0) {
-      cat(paste(day, ": Updated", count_for_day, "rows.\n"))
+      cat(paste(day, ": Updated", count_for_day, "instances.\n"))
       
       # Perform the update
       vet_clinic_open_hours_joined[is_24_hours, c(open_col, close_col)] <- "Open 24 Hours"
@@ -358,7 +392,7 @@ for (day in days) {
 }
 
 cat("--------------------------------\n")
-cat(paste("Total rows affected:", total_rows_affected, "\n"))
+cat(paste("Total Instances:", total_instances, "\n"))
 
 
 ###################################################Updating "Closed"
@@ -367,7 +401,7 @@ cat(paste("Total rows affected:", total_rows_affected, "\n"))
 days <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 # Initialize a variable to track the grand total across all days
-total_rows_affected <- 0
+total_instances <- 0
 
 # 2. Loop
 for (day in days) {
@@ -376,29 +410,29 @@ for (day in days) {
   
   if (open_col %in% names(vet_clinic_open_hours_joined) && close_col %in% names(vet_clinic_open_hours_joined)) {
     
-    # Identify rows where EITHER column is "Open 24 Hours"
-    is_24_hours <- (vet_clinic_open_hours_joined[[open_col]] %in% "Closed") | 
+    # Identify rows where EITHER column is "closed"
+    is_closed <- (vet_clinic_open_hours_joined[[open_col]] %in% "Closed") | 
                    (vet_clinic_open_hours_joined[[close_col]] %in% "Closed")
     
     # --- NEW PART: COUNTING ---
     # Summing the TRUE values gives us the count of affected rows
-    count_for_day <- sum(is_24_hours)
+    count_for_day <- sum(is_closed)
     
     # Add to the grand total
-    total_rows_affected <- total_rows_affected + count_for_day
+    total_instances <- total_instances + count_for_day
     
     # Print a message only if we found something
     if (count_for_day > 0) {
-      cat(paste(day, ": Updated", count_for_day, "rows.\n"))
+      cat(paste(day, ": Updated", count_for_day, "instances.\n"))
       
       # Perform the update
-      vet_clinic_open_hours_joined[is_24_hours, c(open_col, close_col)] <- "Closed"
+      vet_clinic_open_hours_joined[is_closed, c(open_col, close_col)] <- "Closed"
     }
   }
 }
 
 cat("--------------------------------\n")
-cat(paste("Total rows affected:", total_rows_affected, "\n"))
+cat(paste("Total Instances:", total_instances, "\n"))
 
 
 #############################################Block to check if there are any 0000 military times or 2400 military times
@@ -535,14 +569,11 @@ VCOH_std_times <- vet_clinic_open_hours_joined %>%
     mutate(location_employee_size_actual = as.numeric(`Location Employee Size Actual`),
          location_sales_volume_actual = as.numeric(str_remove_all(`Location Sales Volume Actual`, "\\D")))
 
-get_segment_hours <- function(start_dt, end_dt, segment_start_time, segment_end_time) {
-  # Logic to calculate hours between specific time bounds
-  # (You can encapsulate your case_when logic here once)
-}
 
+#A clinic ID is being created. The purpose for this is that we are going to pivot longer so each row refers to a day of the week, sunday through monday. 
 VCOH_std_times$clinic_id <- 1:nrow(VCOH_std_times)
 
-
+#I am not exactly sure what this is used for?I think it is for the analysis?
 simplified_df <- VCOH_std_times %>%
   # Convert to long format: One row per Clinic per Day
   pivot_longer(
@@ -583,53 +614,7 @@ simplified_df <- VCOH_std_times %>%
     TRUE ~ "Normal Clinic"
   ))
 
-duplicates_to_remove <- VCOH_std_times %>%
-  # 1. Identify initial duplicates
-  add_count(unique_clinic_location, name = "n_1") %>%
-  filter(n_1  > 1) %>%
-  
-  # 2. Remove the "dvm" rows
-  # (using ! is cleaner than == FALSE)
-  filter(!str_detect(str_to_lower(`Company Name`), "dvm")) %>%
-  
-  # 3. Recount to see who is STILL a duplicate
-  add_count(unique_clinic_location, name = "n_2") %>%
-  
-  # 4. CRITICAL FIX: Filter again. 
-  # If n_2 is 1, the address is no longer a duplicate (you deleted its partner).
-  
-  # 5. Arrange and Select last so you don't lose columns you might need earlier
-  arrange(unique_clinic_location) %>%
-  filter(!is.na(Address)) %>% 
-  select(`Company Name`, unique_address, unique_clinic_location, n_1, n_2, location_sales_volume_actual, clinic_id) %>%
-  group_by(unique_clinic_location) %>% 
-  filter(location_sales_volume_actual == max(location_sales_volume_actual, na.rm = TRUE)) %>% 
-  slice(1) %>% 
-  ungroup()
 
-clinics_checked$unique_identifier <- paste0(clinics_checked$`Company Name`, "_", clinics_checked$unique_address)
-
-
-
-duplicates <- VCOH_std_times %>%
-  filter(!clinic_id %in% duplicates_to_remove$clinic_id) %>% 
-  add_count(unique_address, name = "n_1") %>%
-  filter(n_1> 1) %>%
-  arrange(unique_address) %>% 
-  select(`Company Name`, `unique_address`) %>% 
-  filter(str_detect(str_to_lower(`Company Name`), "dvm") == FALSE) %>% 
-  add_count(unique_address, name = "n_2")
-
-clinics_checked <- clinics_checked %>% 
-  mutate(result_condensed = str_extract(result, "^[^:]+"))
-
-single_clinics <- clinics_checked %>% 
-  filter(result_condensed == "SINGLE")
-
-multi_clinics <- clinics_checked %>% 
-  filter(result_condensed == "MULTI-TENANT")
-
-#write_csv(duplicates, "clinics_to_check.csv")
 
 VCOH_std_times_deduped <- VCOH_std_times %>% 
   filter(!clinic_id %in% duplicates_to_remove$clinic_id) %>% 
