@@ -24,7 +24,7 @@ library(tigris)
 
 
 ```{r, echo=FALSE}
-setwd("C:/Users/johnc/Documents/GitHub_data/VCAP_open_hours_project_2025_data")
+setwd("C:/Users/john/Documents/GitHub_Data/VCAP-Open-Hours-Project-2025-Data")
 vet_clinic_open_hours <- read_csv("VetList2025.csv")
 SVI_index_2022 <- read_csv("SVI_2022_US_county.csv")
 #The clinics checked file is a list of clinics that have different names, but the same location.
@@ -232,9 +232,6 @@ socio_demo_info <- county_info %>%
 #### This prepares cleaning for both the VCAS Score and the data analysis data set
 
 ```{r}
-
-sum(is.na(vet_clinic_open_hours$Address))
-
 #We created the unique clinic identifier this way so we could identify clinics that are mostlikey the same, but have multiple addresses
 duplicate_clinics_names_prep_df <- vet_clinic_open_hours %>% 
   mutate(unique_clinic = paste0(`Company Name`, "_", `City`, "_", `State`)) %>% 
@@ -270,7 +267,9 @@ vet_clinic_open_hours_sf <- st_as_sf(vet_clinic_open_hours_deduped, coords = c("
 us_counties <- counties(cb = TRUE, resolution = "500k", year = 2023) %>% 
   select(GEOID, NAME)
 
-vet_clinic_open_hours_joined <- st_join(vet_clinic_open_hours_sf, us_counties, join = st_intersects)
+vet_clinic_open_hours_joined <- st_join(vet_clinic_open_hours_sf, us_counties, join = st_intersects) %>% 
+  mutate(location_employee_size_actual = as.numeric(`Location Employee Size Actual`),
+         location_sales_volume_actual = as.numeric(str_remove_all(`Location Sales Volume Actual`, "\\D")))
 
 #This block was used for finding the clinics with the same address but different clinic name
 duplicates <- vet_clinic_open_hours_joined %>%
@@ -283,15 +282,20 @@ duplicates <- vet_clinic_open_hours_joined %>%
 
 #write_csv(duplicates, "clinics_to_check.csv")
 
+#Block below is used to remove duplicates of clinics that are single tenant clinics
+
 clinics_checked <- clinics_checked %>% 
   mutate(result_condensed = str_extract(result, "^[^:]+"))
 
-single_clinics <- clinics_checked %>% 
-  filter(result_condensed == "SINGLE") %>% 
-  
+single_clinics_to_keep <- clinics_checked %>% 
+  filter(result_condensed == "SINGLE") %>%
+  mutate(single_clinics_join_key = paste0(`Company Name`, "_", unique_address)) %>%
+  left_join(select(vet_clinic_open_hours_joined, unique_clinic_location, location_sales_volume_actual), by = c("single_clinics_join_key" = "unique_clinic_location")) %>%
+  group_by(unique_address) %>% 
+  slice_max(location_sales_volume_actual, n = 1, with_ties = FALSE)
 
-multi_clinics <- clinics_checked %>% 
-  filter(result_condensed == "MULTI-TENANT")
+vet_clinic_open_hours_joined <- vet_clinic_open_hours_joined %>% 
+  filter(!unique_clinic_location %in% c(single_clinics_to_keep$single_clinics_join_key))
 
 
 ```
@@ -304,8 +308,6 @@ My reasoning for not being worried about not having every clinic deduped is beca
 ```{r, include=FALSE}
 
 vet_clinic_values <- vet_clinic_open_hours_joined %>% 
-  mutate(location_employee_size_actual = as.numeric(`Location Employee Size Actual`),
-         location_sales_volume_actual = as.numeric(str_remove_all(`Location Sales Volume Actual`, "\\D"))) %>% 
   group_by(GEOID) %>%
   summarise(NumberofEmployees_sum = sum(location_employee_size_actual),
             NumberofEmployees_mean = mean(location_employee_size_actual),
@@ -349,7 +351,18 @@ VCAS_final <- socio_demo_info %>%
 
 ```
 
+# This block adds a new variable called Virtual VCPR allowed
 
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+
+VCPR_state_list <- c("AZ", "CA", "DC", "FL", "ID", "NJ", "OH", "VA", "VT")
+
+vet_clinic_open_hours_joined <- vet_clinic_open_hours_joined %>% 
+  mutate(virtual_VCPR_allowed = case_when(State %in% VCPR_state_list ~ TRUE,
+                                          TRUE ~ FALSE))
+
+
+```
 
 # This prepares the open and closed hours
 
