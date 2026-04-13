@@ -303,7 +303,6 @@ vet_clinic_open_hours_joined <- vet_clinic_open_hours_joined %>%
 
 ## This Block is used for recreating the original VCAS score
 
-My reasoning for not being worried about not having every clinic deduped is because it was not deduped for the previous score.
 
 ```{r, include=FALSE}
 
